@@ -118,31 +118,6 @@ cd analysis && Rscript -e "rmarkdown::render('community_detection.Rmd'); rmarkdo
 - **Presentation:** `presentation/results/` (and `presentation/figures/` for logo).  
   - `paper-presentation.qmd` references `results/` for slides. Scripts in `presentation/scripts/` can generate figures there.
 
-## Publishing this repo (GitHub)
-
-Use the repo name **microbial-network-communities**. From the project root:
-
-```bash
-# 1. Initialise git (if not already)
-git init
-
-# 2. Add all files (data under analysis/data/ are ignored via .gitignore)
-git add .
-git status   # check that analysis/data/ does not appear
-
-# 3. First commit
-git commit -m "Initial commit: thesis, analysis pipeline, no data"
-
-# 4. Create the repo on GitHub (e.g. github.com/new) with name: microbial-network-communities
-#    Do not add a README, .gitignore, or license there (you already have them locally).
-
-# 5. Add remote and push (replace YOUR_USERNAME with your GitHub username if different)
-git remote add origin https://github.com/maxfrei/microbial-network-communities.git
-git branch -M main
-git push -u origin main
-```
-
-To push later: `git add . && git commit -m "Your message" && git push`.
 
 ## Project Goal
 
