@@ -1,0 +1,155 @@
+---
+title: "Prep grump phyloseq"
+output: html_document
+date: "2026-01-15"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(phyloseq)
+```
+
+
+# GRUMP database
+
+The Global rRNA Universal Metabarcoding Plankton (GRUMP) database (https://www.nature.com/articles/s41597-025-05423-9) contains around 1000 sampples from cruises (2003-2020). The data contains DNA counts of all three domains (bacteria, archaea, eukarotes) as features. So for each sample we count which of the different amplicon sequencing variants (ASVs) (think of species) are present or not. Next to the taxonomic annotation for each ASV from the silva database for bacteria and archaea and PR2 for eukarotes, the collaborators also grouped those into ecological relevant classes as an expert annotation (approx. 90 groups). So you can think of the dataset as sampling station x species and each entire tells you how many of those are present. The species are often summarized into later groups such as those based on the expert annotation so you have a dataset with samples times species groups. Next to the species count we often have other covaraites measured on the cruise such as temperature and so on, which is accessible in the metadata.
+
+## Get the data
+
+```{r}
+# Note: GRUMP_data.csv should be placed in analysis/data/raw/ (not tracked in git due to size)
+data_raw <- read.csv("../data/raw/GRUMP_data.csv")
+
+data_raw <- data_raw %>% 
+  mutate(ASV_id = paste0("ASV", as.numeric(factor(ASV_hash))))
+```
+
+## Transform the data from long to wide and fill in 0s
+
+```{r}
+otu_df <- data_raw %>%
+  select(SampleID, ASV_id, Corrected_Sequence_Counts) %>%
+  group_by(SampleID, ASV_id) %>%
+  summarise(Corrected_Sequence_Counts = mean(Corrected_Sequence_Counts)) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = SampleID, names_from = ASV_id, 
+              values_from = Corrected_Sequence_Counts,
+              values_fill = 0) %>%
+  column_to_rownames("SampleID")
+
+# Sort ASVs such that they are ordered by ASV_id
+ordered_asv <- paste0("ASV", sort(as.numeric(str_remove_all(colnames(otu_df), "ASV"))))
+otu_df <- otu_df %>% select(all_of(ordered_asv))  %>%
+  as.matrix()
+```
+
+```{r}
+length(unique(data_raw$ASV))
+asvs_strings <- unique(data_raw$ASV)
+#write.csv(asvs_strings, "asv_strings.csv")
+```
+
+## Split the data in the taxonomic tree
+
+```{r}
+tax_names <- c("Domain", "Supergroup","Division", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+erc_names <- c("Eco_relevant_plank_groups", "Level_1","Level_1_1",  "Level_2")
+# each OTU has one phylo classification 
+tax_df <- data_raw %>% 
+  dplyr::select(ASV_id, all_of(tax_names)) %>% 
+  distinct(ASV_id, .keep_all = TRUE) %>%
+  mutate(ASV_nr = as.numeric(str_remove_all(ASV_id, "ASV"))) %>%
+  arrange(ASV_nr) %>%
+  select(-ASV_nr) %>%
+  tibble::column_to_rownames("ASV_id") %>%
+  as.matrix()
+
+length(unique(data.frame(tax_df)$Order[data.frame(tax_df)$Order != ""]))
+data.frame(tax_df)$Order[data.frame(tax_df)$Order == ""]
+
+erc_df <- data_raw %>% 
+  dplyr::select(ASV_id, all_of(erc_names)) %>% 
+  distinct(ASV_id, .keep_all = TRUE) %>%
+  mutate(ASV_nr = as.numeric(str_remove_all(ASV_id, "ASV"))) %>%
+  arrange(ASV_nr) %>%
+  select(-ASV_nr) %>%
+  tibble::column_to_rownames("ASV_id") %>%
+  as.matrix()
+```
+
+## Filter out the 16s Chloroplast to avoid double counting taxa
+
+
+```{r}
+chloroplast_filter <- str_detect(erc_df[,1], "_16S", negate = TRUE) 
+# Removing 9557 taxa to avoid double counting 
+print(sum(!chloroplast_filter)) 
+# Keeping 127863 taxa
+print(sum(chloroplast_filter)) 
+
+erc_df <- erc_df[chloroplast_filter, ]
+tax_df <- tax_df[chloroplast_filter, ]
+otu_df <- otu_df[, chloroplast_filter]
+
+```
+
+
+```{r}
+colnames(data_raw)
+
+cols_to_remove = c(tax_names, erc_names,
+                   "Raw_Sequence_Counts",
+                   "Corrected_Sequence_Counts",
+                   "Corrected_dada2_Sequence_Counts",
+                   "Relative_Abundance", "ASV_hash", "ASV", 
+                   "ASV_id", "ProPortal_ASV_Ecotype", "Level_1",
+                   "Level_1_1", "Level_2", "Sequence_Type", "Source_database")
+
+sample_df = data_raw %>% 
+  dplyr::select(-all_of(cols_to_remove)) %>% 
+  distinct(SampleID, .keep_all = TRUE) %>% 
+  tibble::column_to_rownames("SampleID")
+
+
+sample_df <- sample_df[rownames(otu_df), ]
+```
+
+
+
+
+```{r}
+all(rownames(erc_df) == rownames(tax_df))
+all(rownames(erc_df) == colnames(otu_df))
+all(rownames(sample_df) == rownames(otu_df))
+```
+
+
+## creation of phyloseq object
+
+```{r creation of phyloseq object}
+######################################################################
+# creation of phyloseq object
+#############################
+
+phylo_obj = phyloseq::phyloseq(otu_table(otu_df, taxa_are_rows = FALSE), 
+                               tax_table(tax_df), 
+                               sample_data(sample_df))
+phylo_obj
+# saving in binary format
+saveRDS(phylo_obj, "../data/phylo_20260115.rds")
+```
+
+
+```{r}
+phylo_obj_erc = phyloseq::phyloseq(otu_table(otu_df, taxa_are_rows = FALSE), 
+                               tax_table(erc_df), 
+                               sample_data(sample_df))
+phylo_obj_erc
+# saving in binary format
+saveRDS(phylo_obj_erc, "../data/phylo_erc_20260115.rds")
+```
+

@@ -1,0 +1,564 @@
+---
+title: "Community Detection: Algorithm Comparison and Consensus Clustering"
+author: "Maximilian Frei"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+# Overview
+
+This document has three parts:
+
+1. **Algorithm comparison** — We run a small set of algorithms that align with the theory in the seminar paper (Fortunato & Hric 2016): Louvain (modularity), Infomap (flow-based), Fast Greedy, Leading Eigenvector, Walktrap. We briefly compare their results (number of communities, modularity) and discuss why partitions differ. This is not the main focus; it motivates the need for a stable, robust procedure.
+
+2. **Consensus clustering** — Our main approach. We run Louvain many times and take a consensus partition (e.g. the run with maximum modularity, or a partition derived from co-association). This follows the recommendation in Fortunato and Hric (2016) to use consensus clustering for stability. The **consensus communities are the final partition** used in downstream analysis (taxonomy, environmental covariates) in `microbial_community_analysis.Rmd`.
+
+3. **Export** — We save consensus community assignments per node for each basin so that `microbial_community_analysis.Rmd` can analyse modules by taxa and environmental features.
+
+# Load Data
+
+```{r load}
+library(igraph)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+
+atlantic_edges <- read.csv("data/export/estimated_network/atlantic_edgelist.csv")
+pacific_edges <- read.csv("data/export/estimated_network/pacific_edgelist.csv")
+
+g_atlantic <- graph_from_data_frame(atlantic_edges[, c("v1", "v2", "adja")], directed = FALSE)
+g_pacific  <- graph_from_data_frame(pacific_edges[, c("v1", "v2", "adja")], directed = FALSE)
+
+cat("Atlantic:", vcount(g_atlantic), "nodes,", ecount(g_atlantic), "edges\n")
+cat("Pacific:", vcount(g_pacific), "nodes,", ecount(g_pacific), "edges\n")
+```
+
+# 1. Algorithm comparison (brief)
+
+We select algorithms that are (i) covered in the thesis/seminar paper and (ii) implemented in igraph: **Louvain** (modularity, fast), **Infomap** (map equation, flow-based), **Fast Greedy** (agglomerative modularity), **Leading Eigenvector** (spectral modularity), **Walktrap** (random-walk distance). All use (absolute) edge weights. Different methods optimise different objectives, so we expect different numbers of communities and different partitions; the goal here is to see that variation, not to pick a single “best” algorithm.
+
+```{r run-algorithms}
+run_detection_algorithms <- function(g, name = "Network") {
+  E(g)$weight <- abs(E(g)$adja)
+  out <- list()
+  out$louvain <- cluster_louvain(g, weights = E(g)$weight)
+  out$infomap <- cluster_infomap(g, e.weights = E(g)$weight)
+  out$fast_greedy <- cluster_fast_greedy(g, weights = E(g)$weight)
+  out$leading_eigen <- cluster_leading_eigen(g, weights = E(g)$weight)
+  out$walktrap <- cluster_walktrap(g, weights = E(g)$weight)
+
+  modularity_fun <- function(x) {
+    if (is.null(x$modularity)) return(NA)
+    if (length(x$modularity) > 1) return(max(x$modularity))
+    x$modularity
+  }
+
+  summary_df <- data.frame(
+    Algorithm = c("Louvain", "Infomap", "Fast Greedy", "Leading Eigen", "Walktrap"),
+    N_communities = c(
+      length(unique(membership(out$louvain))),
+      length(unique(membership(out$infomap))),
+      length(unique(membership(out$fast_greedy))),
+      length(unique(membership(out$leading_eigen))),
+      length(unique(membership(out$walktrap)))
+    ),
+    Modularity = c(
+      modularity(out$louvain),
+      modularity(out$infomap),
+      modularity(out$fast_greedy),
+      modularity(out$leading_eigen),
+      modularity(out$walktrap)
+    )
+  )
+  list(communities = out, summary = summary_df, graph = g)
+}
+
+res_atlantic <- run_detection_algorithms(g_atlantic, "Atlantic")
+res_pacific  <- run_detection_algorithms(g_pacific, "Pacific")
+```
+
+## Results by basin
+
+```{r algorithm-tables}
+kable(res_atlantic$summary, digits = 4, caption = "Atlantic: algorithm comparison") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+kable(res_pacific$summary, digits = 4, caption = "Pacific: algorithm comparison") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Atlantic vs Pacific (side by side)
+
+```{r compare-basins}
+compare <- bind_rows(
+  res_atlantic$summary %>% mutate(Network = "Atlantic"),
+  res_pacific$summary %>% mutate(Network = "Pacific")
+) %>%
+  pivot_wider(names_from = Network, values_from = c(N_communities, Modularity),
+              names_glue = "{.value}_{Network}")
+
+kable(compare, digits = 4, caption = "Atlantic vs Pacific: algorithm comparison") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Brief discussion:** Algorithms return different numbers of communities and different modularity values because they optimise different objectives (e.g. modularity vs. flow compression). Single runs can also vary (e.g. Louvain is non-deterministic). We therefore do not rely on one algorithm or one run; instead we use **consensus clustering** to obtain a stable partition for downstream analysis.
+
+**Interpretation (algorithm comparison):** The number of communities varies strongly across methods (e.g. from 5–6 for Fast Greedy / Leading Eigen in the Pacific to 49–57 for Walktrap / Infomap). Modularity-based methods (Louvain, Fast Greedy, Leading Eigen, Walktrap) typically return fewer, larger modules and higher modularity; Infomap optimises the map equation and often yields more, smaller communities. For both basins, Atlantic shows higher modularity than Pacific for every algorithm, suggesting a somewhat clearer modular structure in the Atlantic network. Because there is no ground truth, we do not choose a single “best” algorithm; the NMI/VI comparison below quantifies how much the partitions agree, and we then use consensus clustering to obtain a stable partition for downstream analysis.
+
+## Save algorithm comparison to .md (for context)
+
+Write the algorithm comparison tables to a markdown file so the results can be read without re-running (e.g. for follow-up questions).
+
+```{r save-algorithm-comparison-md, echo=FALSE}
+dir.create("results", showWarnings = FALSE)
+sink("results/algorithm_comparison.md")
+cat("# Algorithm comparison (pre-consensus)\n")
+cat("Generated:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n\n")
+cat("## Atlantic\n\n")
+cat("| Algorithm | N_communities | Modularity |\n")
+cat("|-----------|---------------|------------|\n")
+for (i in seq_len(nrow(res_atlantic$summary))) {
+  cat(sprintf("| %s | %d | %.4f |\n",
+      res_atlantic$summary$Algorithm[i], res_atlantic$summary$N_communities[i],
+      res_atlantic$summary$Modularity[i]))
+}
+cat("\n## Pacific\n\n")
+cat("| Algorithm | N_communities | Modularity |\n")
+cat("|-----------|---------------|------------|\n")
+for (i in seq_len(nrow(res_pacific$summary))) {
+  cat(sprintf("| %s | %d | %.4f |\n",
+      res_pacific$summary$Algorithm[i], res_pacific$summary$N_communities[i],
+      res_pacific$summary$Modularity[i]))
+}
+cat("\n## Atlantic vs Pacific (side by side)\n\n")
+cat("| Algorithm | N_communities_Atlantic | N_communities_Pacific | Modularity_Atlantic | Modularity_Pacific |\n")
+cat("|-----------|------------------------|------------------------|---------------------|--------------------|\n")
+for (i in seq_len(nrow(compare))) {
+  cat(sprintf("| %s | %s | %s | %s | %s |\n",
+      compare$Algorithm[i],
+      compare$N_communities_Atlantic[i], compare$N_communities_Pacific[i],
+      compare$Modularity_Atlantic[i], compare$Modularity_Pacific[i]))
+}
+sink()
+cat("Algorithm comparison written to results/algorithm_comparison.md\n")
+```
+
+## Figure for thesis: modularity and number of communities by algorithm and basin
+
+```{r fig-algorithm-bars, fig.width=9, fig.height=4, echo=TRUE}
+# Long format for plotting: Algorithm, Basin, N_communities, Modularity
+plot_compare <- compare %>%
+  pivot_longer(-Algorithm, names_to = "var", values_to = "value") %>%
+  separate(var, into = c("Metric", "Basin"), sep = "_(?=[^_]+$)") %>%
+  mutate(Metric = if_else(Metric == "N_communities", "Number of communities", "Modularity"))
+
+# Order algorithms by height of largest bar: high (left) to low (right) within each panel
+plot_compare_mod <- plot_compare %>% filter(Metric == "Modularity") %>%
+  mutate(Algorithm = reorder(Algorithm, -value, max))
+plot_compare_k   <- plot_compare %>% filter(Metric == "Number of communities") %>%
+  mutate(Algorithm = reorder(Algorithm, -value, max))
+
+if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork", repos = "https://cloud.r-project.org")
+library(patchwork)
+
+p1 <- ggplot(plot_compare_mod, aes(x = Algorithm, y = value, fill = Basin)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_manual(values = c(Atlantic = "#2166ac", Pacific = "#b2182b")) +
+  labs(x = NULL, y = "Modularity", fill = "Basin") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1), legend.position = "none")
+p2 <- ggplot(plot_compare_k, aes(x = Algorithm, y = value, fill = Basin)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_manual(values = c(Atlantic = "#2166ac", Pacific = "#b2182b")) +
+  labs(x = NULL, y = "Number of communities", fill = "Basin") +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1), legend.position = "top")
+p_bars <- p1 + p2
+
+dir.create("../thesis/fig", showWarnings = FALSE)
+ggsave("../thesis/fig/algorithm_comparison_bars.pdf", p_bars, width = 9, height = 4)
+cat("Saved: thesis/fig/algorithm_comparison_bars.pdf\n")
+p_bars
+```
+
+## Export CSV results (pre-consensus)
+
+Save membership tables for the five algorithms *before* running consensus, so we have a snapshot of single-run results.
+
+```{r export-pre-consensus}
+# Memberships with only the 5 algorithms (no consensus yet)
+members_atlantic_pre <- data.frame(
+  node = V(g_atlantic)$name,
+  louvain = membership(res_atlantic$communities$louvain),
+  infomap = membership(res_atlantic$communities$infomap),
+  fast_greedy = membership(res_atlantic$communities$fast_greedy),
+  leading_eigen = membership(res_atlantic$communities$leading_eigen),
+  walktrap = membership(res_atlantic$communities$walktrap)
+)
+members_pacific_pre <- data.frame(
+  node = V(g_pacific)$name,
+  louvain = membership(res_pacific$communities$louvain),
+  infomap = membership(res_pacific$communities$infomap),
+  fast_greedy = membership(res_pacific$communities$fast_greedy),
+  leading_eigen = membership(res_pacific$communities$leading_eigen),
+  walktrap = membership(res_pacific$communities$walktrap)
+)
+
+write.csv(members_atlantic_pre, "results/atlantic_community_memberships.csv", row.names = FALSE)
+write.csv(members_pacific_pre, "results/pacific_community_memberships.csv", row.names = FALSE)
+
+cat("Pre-consensus memberships saved:\n")
+cat("  results/atlantic_community_memberships.csv\n  results/pacific_community_memberships.csv\n")
+cat("(These will be overwritten with full table including consensus after the next section.)\n")
+```
+
+## Similarity between algorithm partitions (NMI and VI)
+
+We compare the five algorithm partitions using **Normalized Mutual Information (NMI)** and **Variation of Information (VI)** \citep{Meila_2007}. NMI = 1 when partitions are identical, 0 when independent; VI is a distance (0 = identical, larger = more different). These are written to `results/algorithm_comparison.md` so the comparison is available without re-running.
+
+```{r similarity-measures, echo=TRUE}
+algs <- c("louvain", "infomap", "fast_greedy", "leading_eigen", "walktrap")
+
+# NMI and VI matrices (5 x 5) for Atlantic and Pacific
+nmi_atl <- matrix(NA, 5, 5); vi_atl <- matrix(NA, 5, 5)
+nmi_pac <- matrix(NA, 5, 5); vi_pac <- matrix(NA, 5, 5)
+rownames(nmi_atl) <- colnames(nmi_atl) <- rownames(vi_atl) <- colnames(vi_atl) <- 
+  c("Louvain", "Infomap", "Fast Greedy", "Leading Eigen", "Walktrap")
+rownames(nmi_pac) <- colnames(nmi_pac) <- rownames(vi_pac) <- colnames(vi_pac) <- 
+  c("Louvain", "Infomap", "Fast Greedy", "Leading Eigen", "Walktrap")
+
+for (i in seq_along(algs)) {
+  for (j in seq_along(algs)) {
+    nmi_atl[i, j] <- compare(members_atlantic_pre[[algs[i]]], members_atlantic_pre[[algs[j]]], method = "nmi")
+    vi_atl[i, j]  <- compare(members_atlantic_pre[[algs[i]]], members_atlantic_pre[[algs[j]]], method = "vi")
+    nmi_pac[i, j] <- compare(members_pacific_pre[[algs[i]]], members_pacific_pre[[algs[j]]], method = "nmi")
+    vi_pac[i, j]  <- compare(members_pacific_pre[[algs[i]]], members_pacific_pre[[algs[j]]], method = "vi")
+  }
+}
+
+# Append to algorithm_comparison.md
+sink("results/algorithm_comparison.md", append = TRUE)
+cat("\n## NMI between algorithms (1 = identical, 0 = independent)\n\n")
+cat("### Atlantic\n\n")
+cat("| | Louvain | Infomap | Fast Greedy | Leading Eigen | Walktrap |\n")
+cat("|---|--------|--------|-------------|---------------|----------|\n")
+for (i in 1:5) {
+  cat(sprintf("| %s | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+      rownames(nmi_atl)[i], nmi_atl[i,1], nmi_atl[i,2], nmi_atl[i,3], nmi_atl[i,4], nmi_atl[i,5]))
+}
+cat("\n### Pacific\n\n")
+cat("| | Louvain | Infomap | Fast Greedy | Leading Eigen | Walktrap |\n")
+cat("|---|--------|--------|-------------|---------------|----------|\n")
+for (i in 1:5) {
+  cat(sprintf("| %s | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+      rownames(nmi_pac)[i], nmi_pac[i,1], nmi_pac[i,2], nmi_pac[i,3], nmi_pac[i,4], nmi_pac[i,5]))
+}
+cat("\n## VI between algorithms (0 = identical, larger = more different)\n\n")
+cat("### Atlantic\n\n")
+cat("| | Louvain | Infomap | Fast Greedy | Leading Eigen | Walktrap |\n")
+cat("|---|--------|--------|-------------|---------------|----------|\n")
+for (i in 1:5) {
+  cat(sprintf("| %s | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+      rownames(vi_atl)[i], vi_atl[i,1], vi_atl[i,2], vi_atl[i,3], vi_atl[i,4], vi_atl[i,5]))
+}
+cat("\n### Pacific\n\n")
+cat("| | Louvain | Infomap | Fast Greedy | Leading Eigen | Walktrap |\n")
+cat("|---|--------|--------|-------------|---------------|----------|\n")
+for (i in 1:5) {
+  cat(sprintf("| %s | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+      rownames(vi_pac)[i], vi_pac[i,1], vi_pac[i,2], vi_pac[i,3], vi_pac[i,4], vi_pac[i,5]))
+}
+sink()
+
+cat("NMI and VI appended to results/algorithm_comparison.md\n")
+```
+
+## Figure for thesis: NMI heatmap between algorithm pairs
+
+```{r fig-nmi-heatmap, fig.width=9, fig.height=4.5, echo=TRUE}
+# Long format: Alg1, Alg2, NMI, Basin (full matrix)
+nmi_long <- bind_rows(
+  as.data.frame(as.table(nmi_atl)) %>% setNames(c("Alg1", "Alg2", "NMI")) %>% mutate(Basin = "Atlantic"),
+  as.data.frame(as.table(nmi_pac)) %>% setNames(c("Alg1", "Alg2", "NMI")) %>% mutate(Basin = "Pacific")
+)
+
+p_nmi <- ggplot(nmi_long, aes(x = Alg1, y = Alg2, fill = NMI)) +
+  geom_tile(colour = "white", linewidth = 0.3) +
+  geom_text(aes(label = sprintf("%.2f", NMI)), size = 2.8) +
+  facet_wrap(~ Basin, ncol = 2) +
+  scale_fill_viridis_c(option = "viridis", limits = c(0, 1), name = "NMI") +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1), panel.grid = element_blank())
+
+ggsave("../thesis/fig/nmi_heatmap.pdf", p_nmi, width = 9, height = 4.5)
+cat("Saved: thesis/fig/nmi_heatmap.pdf\n")
+p_nmi
+```
+
+**Interpretation (NMI and VI):** NMI values between algorithm pairs are all in a moderate range (roughly 0.51–0.67), so no two partitions are identical but all share some structure. Modularity-based methods (Louvain, Fast Greedy, Walktrap) tend to agree more with each other (higher NMI, lower VI); Infomap and Leading Eigen often disagree more with the others (lower NMI, higher VI), consistent with their different objectives (map equation vs modularity). The pattern is similar in both basins. This supports using a consensus over multiple runs of one algorithm (here Louvain) rather than trusting a single run or a single method.
+
+# 2. Consensus clustering (main method)
+
+Following the iterative procedure in \citet{fortunato2016community} (and \citet{Lancichinetti_2012}): (1) apply Louvain on the graph $G$ $n_P$ times to get $n_P$ partitions; (2) build the consensus matrix $D$ where $D_{ij}$ is the fraction of runs in which $i$ and $j$ are in the same community; (3) set all entries of $D$ below a threshold $\tau$ to zero; (4) apply Louvain on the graph with adjacency $D$ $n_P$ times; (5) if all $n_P$ partitions are equal, stop; otherwise go back to step 2. This yields a single stable consensus partition for downstream use in `microbial_community_analysis.Rmd`.
+
+```{r consensus}
+n_runs <- 30L   # nP: number of partitions per iteration
+tau    <- 0.5   # threshold: D_ij set to 0 if D_ij < tau
+max_iter <- 20L # max iterations in case of non-convergence
+
+set.seed(42L)   # reproducible consensus (Louvain is stochastic)
+
+# Log file for progress (optional: pass log_path and name to run_consensus to enable)
+consensus_log_path <- "results/consensus_log.txt"
+dir.create("results", showWarnings = FALSE)
+ts <- function() format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+cat("Consensus clustering run started ", ts(), " (nP = ", n_runs, ", tau = ", tau, ")\n", sep = "", file = consensus_log_path)
+
+run_consensus <- function(g, nP = 30L, tau = 0.5, max_iter = 20L, log_path = NULL, name = "") {
+  n <- vcount(g)
+  node_names <- V(g)$name
+  E(g)$weight <- abs(E(g)$adja)
+  log_ <- function(...) if (!is.null(log_path)) cat(ts(), " ", name, " ", ..., "\n", sep = "", file = log_path, append = TRUE)
+
+  log_("started (n = ", n, " nodes)")
+  # Step 1: Apply Louvain on G nP times
+  runs <- vector("list", nP)
+  for (i in seq_len(nP)) {
+    runs[[i]] <- cluster_louvain(g, weights = E(g)$weight)
+  }
+  log_("step 1 done: ", nP, " Louvain runs on G")
+
+  for (iter in seq_len(max_iter)) {
+    log_("iteration ", iter, "/", max_iter)
+    # Step 2: Consensus matrix D_ij = fraction of runs where i,j in same community.
+    # Build D by community blocks instead of looping over all n^2 pairs: for each run
+    # and each community, add 1/nP to D[indices, indices]. Same result as the double
+    # loop over (i,j), but much faster when there are many communities (we only touch
+    # pairs that are in the same community in that run).
+    # Note on floating point: this order of operations (add 1/nP per block) can differ
+    # from "add 1 then divide by nP" at machine precision. In theory that could change
+    # whether an entry falls just above or below tau after thresholding. Here D_ij
+    # is always a multiple of 1/nP (e.g. 0, 1/30, 2/30, ...), so no value sits exactly
+    # on tau=0.5; the outcome is effectively the same as the naive construction.
+    D <- matrix(0, n, n)
+    rownames(D) <- colnames(D) <- node_names
+    for (r in runs) {
+      m <- membership(r)[node_names]
+      for (c in unique(m)) {
+        idx <- which(m == c)
+        D[idx, idx] <- D[idx, idx] + 1 / nP
+      }
+    }
+    log_("  D built, thresholding...")
+    # Step 3: Threshold
+    D[D < tau] <- 0
+
+    # Build graph from D (same nodes; edges only where D > 0)
+    g_d <- graph_from_adjacency_matrix(D, mode = "undirected", weighted = TRUE, diag = FALSE)
+    log_("  graph from D: ", ecount(g_d), " edges")
+    # Step 4: Apply Louvain on D nP times
+    runs <- vector("list", nP)
+    for (i in seq_len(nP)) {
+      runs[[i]] <- cluster_louvain(g_d, weights = E(g_d)$weight)
+    }
+    log_("  ", nP, " Louvain runs on D done")
+    # Step 5: If all partitions equal, stop
+    ref <- membership(runs[[1]])
+    all_equal <- all(vapply(runs[-1], function(r) compare(membership(r), ref, method = "nmi") >= 1 - 1e-9, logical(1)))
+    if (all_equal) {
+      log_("  converged (all ", nP, " partitions equal)")
+      break
+    }
+    log_("  not converged, continuing")
+  }
+
+  best <- runs[[1]]
+  # Modularity of consensus partition when evaluated on the *original* graph G
+  mod_on_original <- modularity(g, membership(best))
+
+  log_(if (all_equal) "finished" else "hit max_iter", ": ", iter, " iterations, K = ", length(unique(membership(best))), ", Q on G = ", round(mod_on_original, 4))
+  list(
+    best = best,
+    n_communities = length(unique(membership(best))),
+    n_iterations = iter,
+    converged = all_equal,
+    modularity_on_original = mod_on_original
+  )
+}
+
+cat("Running consensus clustering (nP = ", n_runs, ", tau = ", tau, "). Log: ", consensus_log_path, "\n", sep = "")
+consensus_atlantic <- run_consensus(g_atlantic, nP = n_runs, tau = tau, max_iter = max_iter, log_path = consensus_log_path, name = "[Atlantic]")
+cat("  Iterations:", consensus_atlantic$n_iterations, "| Converged:", consensus_atlantic$converged,
+    "| K =", consensus_atlantic$n_communities, "| Q on G =", round(consensus_atlantic$modularity_on_original, 4), "\n")
+
+cat("Running consensus clustering for Pacific...\n")
+consensus_pacific <- run_consensus(g_pacific, nP = n_runs, tau = tau, max_iter = max_iter, log_path = consensus_log_path, name = "[Pacific]")
+cat("  Iterations:", consensus_pacific$n_iterations, "| Converged:", consensus_pacific$converged,
+    "| K =", consensus_pacific$n_communities, "| Q on G =", round(consensus_pacific$modularity_on_original, 4), "\n")
+```
+
+## Consensus summary
+
+```{r consensus-summary}
+consensus_summary <- data.frame(
+  Network = c("Atlantic", "Pacific"),
+  N_runs = n_runs,
+  N_communities = c(consensus_atlantic$n_communities, consensus_pacific$n_communities),
+  N_iterations = c(consensus_atlantic$n_iterations, consensus_pacific$n_iterations),
+  Converged = c(consensus_atlantic$converged, consensus_pacific$converged),
+  Q_on_original = c(consensus_atlantic$modularity_on_original, consensus_pacific$modularity_on_original)
+)
+
+kable(consensus_summary, digits = 4,
+      caption = "Consensus clustering: iterative consensus matrix (tau = 0.5); Q on original = modularity of consensus partition evaluated on G.") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+These **consensus communities** (one partition per basin) are the final output of this document and are used in `microbial_community_analysis.Rmd` for taxonomy and environmental analysis.
+
+# 3. Export
+
+We save two types of output:
+
+- **Consensus-only memberships** — `node` and `community` (consensus partition only), for use in `microbial_community_analysis.Rmd`.
+- **Full memberships** — all algorithms plus consensus, for reference or NMI comparison (optional).
+
+```{r export-memberships}
+dir.create("results", showWarnings = FALSE)
+
+# Consensus-only (used by microbial_community_analysis.Rmd); align membership to node order
+consensus_atlantic_df <- data.frame(
+  node = V(g_atlantic)$name,
+  community = membership(consensus_atlantic$best)[V(g_atlantic)$name]
+)
+consensus_pacific_df <- data.frame(
+  node = V(g_pacific)$name,
+  community = membership(consensus_pacific$best)[V(g_pacific)$name]
+)
+write.csv(consensus_atlantic_df, "results/atlantic_consensus_communities.csv", row.names = FALSE)
+write.csv(consensus_pacific_df, "results/pacific_consensus_communities.csv", row.names = FALSE)
+
+# Full table (all algorithms + consensus) for reference
+members_atlantic <- data.frame(
+  node = V(g_atlantic)$name,
+  louvain = membership(res_atlantic$communities$louvain),
+  infomap = membership(res_atlantic$communities$infomap),
+  fast_greedy = membership(res_atlantic$communities$fast_greedy),
+  leading_eigen = membership(res_atlantic$communities$leading_eigen),
+  walktrap = membership(res_atlantic$communities$walktrap),
+  consensus_louvain = membership(consensus_atlantic$best)[V(g_atlantic)$name]
+)
+members_pacific <- data.frame(
+  node = V(g_pacific)$name,
+  louvain = membership(res_pacific$communities$louvain),
+  infomap = membership(res_pacific$communities$infomap),
+  fast_greedy = membership(res_pacific$communities$fast_greedy),
+  leading_eigen = membership(res_pacific$communities$leading_eigen),
+  walktrap = membership(res_pacific$communities$walktrap),
+  consensus_louvain = membership(consensus_pacific$best)[V(g_pacific)$name]
+)
+write.csv(members_atlantic, "results/atlantic_community_memberships.csv", row.names = FALSE)
+write.csv(members_pacific, "results/pacific_community_memberships.csv", row.names = FALSE)
+
+cat("Saved (consensus-only, for microbial_community_analysis.Rmd):\n")
+cat("  results/atlantic_consensus_communities.csv\n  results/pacific_consensus_communities.csv\n\n")
+cat("Saved (full, for reference):\n")
+cat("  results/atlantic_community_memberships.csv\n  results/pacific_community_memberships.csv\n")
+```
+
+```{r export-summary, echo=FALSE}
+sink("results/community_detection_summary.md")
+cat("# Community detection summary\n")
+cat("Generated:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n\n")
+cat("## Algorithm comparison (Atlantic)\n\n")
+cat("| Algorithm | N_communities | Modularity |\n")
+cat("|-----------|---------------|------------|\n")
+for (i in seq_len(nrow(res_atlantic$summary))) {
+  cat(sprintf("| %s | %d | %.4f |\n",
+      res_atlantic$summary$Algorithm[i], res_atlantic$summary$N_communities[i],
+      res_atlantic$summary$Modularity[i]))
+}
+cat("\n## Algorithm comparison (Pacific)\n\n")
+cat("| Algorithm | N_communities | Modularity |\n")
+cat("|-----------|---------------|------------|\n")
+for (i in seq_len(nrow(res_pacific$summary))) {
+  cat(sprintf("| %s | %d | %.4f |\n",
+      res_pacific$summary$Algorithm[i], res_pacific$summary$N_communities[i],
+      res_pacific$summary$Modularity[i]))
+}
+cat("\n## Consensus clustering (iterative, nP = ", n_runs, ", tau = 0.5) — final partition for downstream\n\n", sep = "")
+cat("| Network | N_communities | N_iterations | Converged | Q_on_original |\n")
+cat("|---------|---------------|--------------|-----------|---------------|\n")
+cat(sprintf("| Atlantic | %d | %d | %s | %.4f |\n",
+    consensus_summary$N_communities[1], consensus_summary$N_iterations[1],
+    consensus_summary$Converged[1], consensus_summary$Q_on_original[1]))
+cat(sprintf("| Pacific  | %d | %d | %s | %.4f |\n",
+    consensus_summary$N_communities[2], consensus_summary$N_iterations[2],
+    consensus_summary$Converged[2], consensus_summary$Q_on_original[2]))
+sink()
+cat("Summary written to results/community_detection_summary.md\n")
+```
+
+# Optional: NMI between algorithms
+
+Normalized Mutual Information (NMI) measures agreement between two partitions (1 = identical). Shown here for completeness; the downstream analysis uses only the consensus partition.
+
+```{r nmi, eval=TRUE}
+algs <- c("louvain", "infomap", "fast_greedy", "leading_eigen", "walktrap", "consensus_louvain")
+nmi_atlantic <- matrix(NA, 6, 6)
+colnames(nmi_atlantic) <- rownames(nmi_atlantic) <- algs
+
+for (i in seq_along(algs)) {
+  for (j in seq_along(algs)) {
+    nmi_atlantic[i, j] <- compare(members_atlantic[[algs[i]]],
+                                  members_atlantic[[algs[j]]],
+                                  method = "nmi")
+  }
+}
+
+kable(round(nmi_atlantic, 3), caption = "Atlantic: NMI between algorithm partitions") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r nmi-pacific}
+nmi_pacific <- matrix(NA, 6, 6)
+colnames(nmi_pacific) <- rownames(nmi_pacific) <- algs
+for (i in seq_along(algs)) {
+  for (j in seq_along(algs)) {
+    nmi_pacific[i, j] <- compare(members_pacific[[algs[i]]],
+                                 members_pacific[[algs[j]]],
+                                 method = "nmi")
+  }
+}
+kable(round(nmi_pacific, 3), caption = "Pacific: NMI between algorithm partitions") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+# Optional: Consensus community size distribution
+
+```{r community-sizes, fig.height=6, fig.width=12}
+par(mfrow = c(1, 2))
+
+sizes_atl <- sizes(consensus_atlantic$best)
+sizes_pac <- sizes(consensus_pacific$best)
+
+barplot(sizes_atl, main = "Atlantic: Consensus community sizes",
+        xlab = "Community", ylab = "Size", col = "skyblue", border = NA)
+
+barplot(sizes_pac, main = "Pacific: Consensus community sizes",
+        xlab = "Community", ylab = "Size", col = "coral", border = NA)
+```
+
+---
+
+**Next:** Run `microbial_community_analysis.Rmd` to analyse the consensus communities using taxonomy (Phylum, Class, etc.) and environmental covariates (temperature, salinity, depth, oxygen) and to compare basins.

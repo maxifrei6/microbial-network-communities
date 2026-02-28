@@ -1,0 +1,968 @@
+---
+title: "Split data"
+output: html_document
+date: "2026-01-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(phyloseq)
+library(tidyverse)
+```
+
+
+```{r}
+phylo <- readRDS("../data/phylo_20260115.rds")
+# only first 200m
+ps_subset <- subset_samples(phylo, Depth_Category == "Depth_0m-200m")
+```
+
+```{r}
+filter_basin_aware_union <- function(ps, group_var = "Basin") {
+  # 1. Split the data by Basin (Atlantic, Pacific, Arctic)
+  # This creates a list of smaller phyloseq objects
+  ps_list <- split_by_sample_var(ps, group_var)
+  
+  # 2. Define the Per-Basin Filter Function
+  # We apply this to each basin individually
+  get_stable_taxa <- function(ps_sub) {
+    n_samps <- nsamples(ps_sub)
+    
+    # SAFETY LOCK for Small Datasets (like Arctic)
+    # If N is small (e.g. 50), 10% is only 5 samples. That's too unstable for SpiecEasi.
+    # We enforce a HARD FLOOR: Must appear in at least 15 samples OR 10%, whichever is higher.
+    min_samples_required <- max(15, 0.15 * n_samps)
+    
+    # A. Prevalence Check
+    # Must meet the sample floor calculated above
+    otu <- if(taxa_are_rows(ps_sub)) otu_table(ps_sub) else t(otu_table(ps_sub))
+    prev_counts <- apply(otu, 1, function(x) sum(x > 0))
+    keep_prev <- prev_counts >= min_samples_required
+    
+    # B. Abundance Check (Bloom Rescue)
+    # If you are rare (< min_samples) but locally HUGE (>1% relative abundance), we rescue you.
+    # Calculate relative abundance just for this basin
+    ps_rel <- transform_sample_counts(ps_sub, function(x) x / sum(x))
+    otu_rel <- if(taxa_are_rows(ps_rel)) otu_table(ps_rel) else t(otu_table(ps_rel))
+    
+    # Check for "Bloom" event (High local abundance in > 2 samples)
+    is_bloom <- apply(otu_rel, 1, function(x) sum(x > 0.01) >= 5)
+    
+    # Combine
+    return(names(which(keep_prev | is_bloom)))
+  }
+  get_stable_taxa(ps_list[[1]])
+  # 3. Run filter on each basin and get list of names
+  list_of_taxa_names <- map(ps_list, get_stable_taxa)
+  
+  # 4. Take the UNION of all names
+  # If it passed in Arctic, it stays. If it passed in Atlantic, it stays.
+  final_taxa_names <- reduce(list_of_taxa_names, union)
+  
+  # 5. Prune the ORIGINAL merged object
+  ps_final <- prune_taxa(final_taxa_names, ps)
+  
+  # --- REPORTING ---
+  cat("Total Unique Taxa Kept:", ntaxa(ps_final), "\n")
+  cat("Breakdown of who contributed (Taxa can be in multiple): \n")
+  map2(names(list_of_taxa_names), list_of_taxa_names, 
+       ~cat("  -", .x, "contributed:", length(.y), "taxa\n"))
+  
+  return(ps_final)
+}
+
+# --- HELPER: Split Phyloseq by Variable ---
+split_by_sample_var <- function(ps, var_name) {
+  group_vec <- get_variable(ps, var_name)
+  # 2. Get unique groups and name them (so the list is named)
+  groups <- unique(group_vec)
+  groups <- groups[!is.na(groups)] # Remove NAs if any
+  names(groups) <- groups
+  #map(groups, ~subset_samples(ps, Ocean_Basin == .x))
+  map(groups, function(current_group) {
+    # Find sample names that belong to this group
+    samples_to_keep <- sample_names(ps)[group_vec == current_group]
+    # Prune the phyloseq object to just those samples
+    prune_samples(samples_to_keep, ps)
+  })
+}
+
+
+ps_union_filtered <- filter_basin_aware_union(ps = ps_subset, group_var = "Ocean_Basin")
+ps_union_filtered_splitted <- split_by_sample_var(ps_union_filtered, var_name = "Ocean_Basin")
+ps_union_filtered_splitted1 <- ps_union_filtered_splitted %>%
+  map(~prune_taxa(taxa_sums(.x) > 0, .x))
+```
+
+```{r}
+at_names <- colnames(ps_union_filtered_splitted1$Atlantic.Ocean@otu_table)
+pa_names <- colnames(ps_union_filtered_splitted1$Pacific.Ocean@otu_table)
+
+length(intersect(at_names, pa_names))
+```
+
+```{r}
+otu_pacific_df <- as.data.frame(otu_table(ps_union_filtered_splitted1$Pacific.Ocean))
+tax_pacific_df <- as.data.frame(tax_table(ps_union_filtered_splitted1$Pacific.Ocean))
+sample_pacific_df <- data.frame(sample_data(ps_union_filtered_splitted1$Pacific.Ocean))
+
+write.csv(otu_pacific_df, file = "../data/export/pacific/otu_pacific_table.csv", row.names = TRUE)
+write.csv(tax_pacific_df, file = "../data/export/pacific/tax_pacific_table.csv", row.names = TRUE)
+write.csv(sample_pacific_df, file = "../data/export/pacific/sample_pacific_data.csv", row.names = TRUE)
+```
+
+
+```{r}
+filter_milici_logic <- function(ps_obj) {
+  
+  # 1. Clean out empty taxa (taxa not present in this specific subset)
+  # This ensures our prevalence calculations are accurate for this basin.
+  ps_obj <- prune_taxa(taxa_sums(ps_obj) > 0, ps_obj)
+  
+  # --- PRE-CALCULATIONS ---
+  
+  # Total reads in this subset (for the 0.001% "whole dataset" threshold)
+  total_reads <- sum(sample_sums(ps_obj))
+  
+  # Number of samples (for the 2% and 5% prevalence thresholds)
+  n_samples <- nsamples(ps_obj)
+  
+  # Transform to Relative Abundance (for the >1% and >0.1% abundance checks)
+  ps_rel <- transform_sample_counts(ps_obj, function(x) x / sum(x))
+  
+  # Extract OTU tables (Ensure Taxa are Rows for vectorized calculation)
+  # We use standard counts for the base check, relative for the others.
+  otu_counts <- if(taxa_are_rows(ps_obj)) otu_table(ps_obj) else t(otu_table(ps_obj))
+  otu_rel   <- if(taxa_are_rows(ps_rel)) otu_table(ps_rel) else t(otu_table(ps_rel))
+
+  # --- LOGIC IMPLEMENTATION ---
+  
+  # Base Requirement: Abundance > 0.001% of the whole dataset (subset total)
+  # 0.001% = 0.00001
+  criteria_base <- rowSums(otu_counts) > (total_reads * 0.00001)
+  
+  # Condition 1: Present in at least 1 sample at relative abundance > 1%
+  # (> 0.01)
+  criteria_1 <- rowSums(otu_rel > 0.01) >= 1
+  
+  # Condition 2: Present in at least 2% of samples at relative abundance > 0.1%
+  # (> 0.001). 2% of samples = 0.02 * n_samples
+  criteria_2 <- rowSums(otu_rel > 0.001) >= (0.02 * n_samples)
+  
+  # Condition 3: Present in at least 5% of samples in any abundance (> 0)
+  criteria_3 <- rowSums(otu_counts > 0) >= (0.05 * n_samples)
+  
+  # --- COMBINE AND PRUNE ---
+  
+  # Logic: Base AND (Cond1 OR Cond2 OR Cond3)
+  keep_taxa <- criteria_base & (criteria_1 | criteria_2 | criteria_3)
+  
+  # Prune the original object
+  return(prune_taxa(keep_taxa, ps_obj))
+}
+```
+
+```{r}
+# 1. Get list of unique Ocean Basins (Change "Ocean_Basin" to your actual column name)
+ps <- ps_subset
+
+basins <- unique(sample_data(ps)$Ocean_Basin)
+
+# 2. Loop through basins, subset, and filter
+filtered_list <- lapply(basins, function(current_basin) {
+  keep_samples <- sample_data(ps)$Ocean_Basin == current_basin
+  ps_sub <- prune_samples(keep_samples, ps)
+  # Subset to specific basin
+  # ps_sub <- subset_samples(ps, Ocean_Basin == basin)
+  
+  # Skip empty subsets if any exist
+  if(nsamples(ps_sub) == 0) return(NULL)
+  
+  # Apply the Milici filter function
+  ps_filt <- filter_milici_logic(ps_sub)
+  
+  return(ps_filt)
+})
+
+# 3. Merge the results back into one phyloseq object
+# Remove NULLs just in case
+filtered_list <- filtered_list[!sapply(filtered_list, is.null)]
+
+# Merge
+ps_milici_final <- do.call(merge_phyloseq, filtered_list)
+
+names(filtered_list) <- basins
+```
+
+```{r}
+at_names <- colnames(filtered_list$Atlantic.Ocean@otu_table)
+pa_names <- colnames(filtered_list$Pacific.Ocean@otu_table)
+
+length(intersect(at_names, pa_names))
+```
+
+
+```{r}
+table(sample_data(ps_milici_final)$Ocean_Basin)
+```
+
+
+```{r}
+# Initial stats
+print(ps) 
+
+# Final stats
+print(ps_milici_final)
+
+# See how many were removed
+n_original <- ntaxa(ps)
+n_final <- ntaxa(ps_milici_final)
+cat("Removed", n_original - n_final, "ASVs based on Milici filter.")
+```
+
+
+
+
+###
+
+```{r}
+phylo_erc <- readRDS("../data/phylo_erc_20260115.rds")
+# only first 200m
+ps_erc_subset <- subset_samples(phylo_erc, Depth_Category == "Depth_0m-200m")
+```
+
+```{r}
+erc_df <- data.frame(ps_erc_subset@tax_table)
+erc_df <- erc_df %>%
+  select(Level_1, Level_2, Eco_relevant_plank_groups)
+
+ps_erc_subset1 <- phyloseq(otu_table(ps_erc_subset),
+                          tax_table(as.matrix(erc_df)),
+                          sample_data(ps_erc_subset))
+
+
+
+ps_erc_subset2 <- speedyseq::tax_glom(
+  ps_erc_subset1,
+  taxrank = "Eco_relevant_plank_groups",
+  NArm = TRUE,
+  bad_empty = c(NA, "", " ", "\t"),
+  reorder = FALSE
+)
+
+otu_erc_df <- as.data.frame(otu_table(ps_erc_subset2))
+tax_erc_df <- as.data.frame(tax_table(ps_erc_subset2))
+sample_erc_df <- data.frame(sample_data(ps_erc_subset2))
+
+write.csv(otu_erc_df, file = "../data/export/erc/otu_erc_table.csv", row.names = TRUE)
+write.csv(tax_erc_df, file = "../data/export/erc/tax_erc_table.csv", row.names = TRUE)
+write.csv(sample_erc_df, file = "../data/export/erc/sample_erc_data.csv", row.names = TRUE)
+```
+
+
+
+
+####
+
+```{r}
+library(phyloseq)
+library(dplyr)
+
+library(phyloseq)
+library(dplyr)
+library(tibble)
+
+get_env_means_per_var <- function(ps, env_vars) {
+  
+  # 1. Get the OTU table (Taxa as columns for easy subsetting later)
+  otu_mat <- as(otu_table(ps), "matrix")
+  if(taxa_are_rows(ps)) {
+    otu_mat <- t(otu_mat)
+  }
+  
+  # 2. Get Metadata
+  meta_df <- as(sample_data(ps), "data.frame")
+  
+  # 3. Iterate through each variable individually
+  # This prevents "Sample A" from being dropped for Temp just because it lacks pH
+  results_list <- lapply(env_vars, function(var_name) {
+    
+    # Extract the single variable vector
+    # Ensure numeric (suppress warnings if you know columns are messy)
+    vals <- suppressWarnings(as.numeric(as.character(meta_df[[var_name]])))
+    
+    # Identify valid samples for THIS specific variable
+    valid_idx <- !is.na(vals)
+    
+    # If no data exists for this variable, return NAs
+    if(sum(valid_idx) == 0) {
+      return(rep(NA, ncol(otu_mat)))
+    }
+    
+    # Subset to valid samples only
+    current_otu <- otu_mat[valid_idx, , drop = FALSE]
+    current_vals <- vals[valid_idx]
+    
+    # Calculate Weighted Mean
+    # Numerator: Sum(Abundance * Value)
+    weighted_sum <- t(current_otu) %*% current_vals
+    
+    # Denominator: Sum(Abundance)
+    total_abund <- colSums(current_otu)
+    
+    # Divide (Handle 0 abundance to avoid NaN)
+    means <- weighted_sum / total_abund
+    means[total_abund == 0] <- NA
+    
+    return(as.vector(means))
+  })
+  
+  # 4. Combine results into a DataFrame
+  names(results_list) <- env_vars
+  final_df <- as.data.frame(results_list)
+  
+  # Add Taxa names
+  final_df$Taxa <- colnames(otu_mat)
+  
+  # Reorder so Taxa is the first column
+  final_df <- final_df %>% select(Taxa, everything())
+  
+  return(final_df)
+}
+
+my_vars <- c("lat", "lon", "depth", "Temperature", "Salinity", 
+             "Oxygen")
+
+# 2. Run the bulk calculation
+# This returns a dataframe with columns: Taxa, Temperature, Salinity, etc.
+node_characteristics_at <- get_multi_env_means(ps_union_filtered_splitted1$Atlantic.Ocean, my_vars)
+node_characteristics_pa <- get_multi_env_means(ps_union_filtered_splitted1$Pacific.Ocean, my_vars)
+
+
+
+ps_union_filtered_splitted1$Atlantic.Ocean@tax_table
+ps_union_filtered_splitted1$Pacific.Ocean@tax_table
+
+ps_erc_subset1@tax_table
+ps_union_filtered@tax_table
+
+write.csv(as.matrix(ps_union_filtered@tax_table), file = "../data/export/estimated_network/otu_tax_table_all.csv", row.names = TRUE)
+write.csv(as.matrix(ps_erc_subset1@tax_table), file = "../data/export/estimated_network/otu_erc_table_all.csv", row.names = TRUE)
+write.csv(node_characteristics_at, file = "../data/export/estimated_network/node_features_atlantic.csv", row.names = TRUE)
+write.csv(node_characteristics_pa, file = "../data/export/estimated_network/node_features_pacific.csv", row.names = TRUE)
+
+```
+
+
+```{r}
+library(NetCoMi)
+
+ps_merged <- merge_phyloseq(ps_union_filtered_splitted1$Atlantic.Ocean,
+                            ps_union_filtered_splitted1$Pacific.Ocean)
+count_mat <- as.matrix(otu_table(ps_merged))
+group_vec <- sample_data(ps_merged)$Ocean_Basin
+group_vec <- as.numeric(group_vec == "Atlantic.Ocean")
+
+
+dim(count_mat)
+length(group_vec)
+
+
+n_cores <- 6
+
+net_basin <- netConstruct(data = ps_merged,
+                          group = group_vec,
+                           matchDesign = NULL,
+                           measure = "spieceasi", 
+                           measurePar = list(method = "mb", # Meinshausen-Bühlmann
+                                             nlambda = 20, 
+                                             pulsar.params = list(rep.num = 5,
+                                                                  ncores = n_cores,
+                                                                  thresh = 0.01)),
+                           normMethod = "none", 
+                           zeroMethod = "none", 
+                           sparsMethod = "none",
+                           dissFunc = "signed",
+                           verbose = 3,
+                          seed = 123)
+
+
+write.csv(net_basin$edgelist1, file = "../data/export/estimated_network/pacific_edgelist.csv", row.names = TRUE)
+write.csv(net_basin$edgelist2, file = "../data/export/estimated_network/atlantic_edgelist.csv", row.names = TRUE)
+saveRDS(net_basin, "../data/export/estimated_network/netcomi_object.RDS")
+```
+
+```{r}
+summary(net_basin)
+```
+
+
+```{r}
+# Check number of edges in Atlantic network
+nrow(net_basin$edgelist1)
+
+# Check number of edges in Pacific network
+nrow(net_basin$edgelist2)
+```
+
+```{r}
+props_season <- netAnalyze(net_basin, 
+                           clustMethod = "cluster_fast_greedy", 
+                           hubPar = "degree",
+                           weightDeg = FALSE)
+```
+
+```{r}
+summary(props_season)
+```
+
+```{r}
+n_modules_atl <- table(props_season$clustering$clust1)
+print(paste("Atlantic Modules:", n_modules_atl))
+
+# For Group 2 (Pacific)
+n_modules_pac <- table(props_season$clustering$clust2)
+print(paste("Pacific Modules:", n_modules_pac))
+```
+
+
+```{r}
+plot(props_season, 
+     # --- Layout ---
+     sameLayout = TRUE, 
+     layoutGroup = "union",  # Matches positions for Atlantic/Pacific
+     
+     # --- VISUAL FILTER (Crucial for 37k edges) ---
+     nodeFilter = "highestDegree", # Only show the most important nodes
+     nodeFilterPar = 500,          # Top 500 nodes (standard for publication)
+     
+     # --- Appearance ---
+     nodeColor = "cluster",      # Color by Module
+     nodeSize = "degree",        # Big hubs = Big circles
+     edgeWidth = 0.5,            # Thin edges for clarity
+     edgeTranspHigh = 20,        # Make weak edges transparent
+     
+     # --- Labels ---
+     labels = FALSE,             # No messy text
+     hubLabels = TRUE,           # Only label the Hubs
+     cexHubLabels = 1.0,
+     
+     # --- Titles ---
+     groupNames = c("Atlantic", "Pacific"),
+     title1 = "Atlantic Network (Top 500)", 
+     title2 = "Pacific Network (Top 500)"
+)
+```
+```{r}
+plot(props_season, 
+     # --- 1. Layout & Physics (The "Nature" Separation) ---
+     layout = "spring",        # Force-directed layout (Fruchterman-Reingold)
+     repulsion = 1.3,          # Pushes nodes further apart (Higher = more separation)
+     sameLayout = TRUE, 
+     layoutGroup = "union",
+     
+     # --- 2. Node Styling (Bigger & Colored) ---
+     nodeFilter = "highestDegree",
+     nodeFilterPar = 500,      # Keep your Skeleton
+     nodeColor = "cluster",    # Color by module
+     nodeSize = "degree", 
+     cexNodes = 2.5,           # Make nodes significantly BIGGER
+     nodeBorderCol = "black",  # Add a crisp border (like the paper)
+     
+     # --- 3. Edge Styling (The "Grey" Fix) ---
+     edgeWidth = 0.3,          # Very thin edges
+     edgeColor = "grey80",     # Make them light gray (hides the "hairball")
+     edgeTranspHigh = 40,      # High transparency so they don't dominate
+     
+     # --- 4. Labels ---
+     labels = FALSE,           # Clean look
+     hubLabels = TRUE,         # Only label major hubs
+     cexHubLabels = 1.2,       # Readable hub numbers
+     
+     # --- Titles ---
+     groupNames = c("Atlantic", "Pacific"),
+     title1 = "Atlantic (Nature Style)", 
+     title2 = "Pacific (Nature Style)"
+)
+```
+
+
+```{r}
+
+# 1. Extract the graph object from your NetCoMi result
+# (NetCoMi objects usually have a 'g_union' or similar slot if you used 'netCompare')
+# Or create it from the adjacency matrix:
+g_milke <- graph_from_adjacency_matrix(net_basin$adjaMat1, 
+                                       mode = "undirected", 
+                                       weighted = TRUE)
+
+# 2. Add your module data (Crucial for the coloring)
+# Assuming 'props_basin' has your clustering data
+V(g_milke)$cluster <- props_season$clustering$clust1
+V(g_milke)$degree <- degree(g_milke)
+
+coords <- layout_with_drl(g_milke, options = list(simmer.attraction = 0))
+
+# Define a color palette for modules (like their yellow/green/purple)
+milke_palette <- c("#F0E442", "#E69F00", "#56B4E9", "#009E73", 
+                   "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999")
+
+plot(g_milke,
+     layout = coords,
+     
+     # --- Nodes (The "Nature" Look) ---
+     vertex.size = log(V(g_milke)$degree),  # Scale size by degree (log scale keeps giants in check)
+     vertex.color = milke_palette[V(g_milke)$cluster], # Color by module
+     vertex.frame.color = "black",              # Thin black border
+     vertex.label = NA,                         # No labels on nodes
+     
+     # --- Edges (The "Background" Look) ---
+     edge.width = 0.1,                          # Extremely thin
+     edge.color = adjustcolor("grey50", alpha.f = 0.3), # Grey and transparent
+     
+     main = "Atlantic Network (Milke Style)"
+)
+
+
+library(igraph)
+library(scales) # For alpha()
+
+# 1. Setup Data (Extract from NetCoMi)
+g <- graph_from_adjacency_matrix(net_basin$adjaMat1, mode="undirected", weighted=TRUE)
+
+# 2. CRITICAL: Remove Negative Edges (Fixes the layout "crunch")
+# Milke et al. excluded negative associations 
+g <- delete.edges(g, E(g)[weight < 0])
+
+# 3. Add Attributes
+V(g)$cluster <- props_basin$clustering$clust1
+V(g)$degree <- degree(g)
+# Use the Milke color palette (approximate)
+milke_cols <- c("#F0E442", "#E69F00", "#56B4E9", "#009E73", "#CC79A7", 
+                "#0072B2", "#D55E00", "#999999", "white", "black")
+V(g)$color <- milke_cols[V(g)$cluster]
+
+# 4. Calculate Layout (DrL is often better for module separation than Fruchterman)
+coords <- layout_with_drl(g, options=list(simmer.attraction=0))
+
+# 5. Calculate Centroids for Module Labels
+# This finds the center of each cluster to place the big "1", "2", "3"
+module_ids <- sort(unique(V(g)$cluster))
+centroid_x <- tapply(coords[,1], V(g)$cluster, mean)
+centroid_y <- tapply(coords[,2], V(g)$cluster, mean)
+
+# --- PLOTTING ---
+par(mar=c(0,0,0,0)) # No margins
+
+plot(g,
+     layout = coords,
+     
+     # NODES: Big, Clean, Black Borders
+     vertex.size = log(V(g)$degree + 1) * 3, 
+     vertex.label = NA,           # NO node text
+     vertex.frame.color = "black", 
+     vertex.frame.width = 1.5,    # Crisp outline
+     
+     # EDGES: The "Ghost" Look
+     edge.width = 0.2,
+     edge.color = alpha("grey50", 0.15), # 15% opacity (The key!)
+     edge.curved = 0.1                   # Slight curve looks more organic
+)
+
+# 6. Add the "Milke" Box Labels manually
+# We plot text boxes at the calculated centroids
+text(centroid_x, centroid_y, 
+     labels = module_ids, 
+     cex = 2,           # Big font
+     font = 2,          # Bold
+     col = "black", 
+     adj = 0.5)
+
+# Optional: Draw boxes around them (like the paper)
+rect(centroid_x - 0.5, centroid_y - 0.5, 
+     centroid_x + 0.5, centroid_y + 0.5, 
+     border = milke_cols[module_ids], lwd = 3)
+
+
+plot(props_season,
+     layout = coords,
+     
+     # --- Nodes (The "Nature" Look) ---
+     vertex.size = log(V(g_milke)$degree) * 3,  # Scale size by degree (log scale keeps giants in check)
+     vertex.color = milke_palette[V(g_milke)$cluster], # Color by module
+     vertex.frame.color = "black",              # Thin black border
+     vertex.label = NA,                         # No labels on nodes
+     
+     # --- Edges (The "Background" Look) ---
+     edge.width = 0.1,                          # Extremely thin
+     edge.color = adjustcolor("grey50", alpha.f = 0.3), # Grey and transparent
+     
+     main = "Atlantic Network (Milke Style)"
+)
+# Add the Box Labels manually (like "1", "3", "6" in the paper) using `text()` or in Illustrator.
+
+
+set.seed(123456)
+graph <- igraph::graph_from_adjacency_matrix(net_basin$adjaMat1, 
+                                             weighted = TRUE)
+set.seed(123456)
+lay_fr <- igraph::layout_with_fr(graph)
+
+# Row names of the layout matrix must match the node names
+rownames(lay_fr) <- rownames(net_basin$adjaMat1)
+
+plot(props_season, 
+     layout = lay_fr)
+```
+```{r}
+library(igraph)
+
+# 1. Setup the Graph (As before)
+g <- graph_from_adjacency_matrix(net_basin$adjaMat1, mode="undirected", weighted=TRUE)
+g <- delete.edges(g, E(g)[weight < 0]) # Remove negative edges
+V(g)$cluster <- props_season$clustering$clust1
+V(g)$degree <- degree(g)
+
+# --- THE PHYSICS HACK ---
+
+# 2. Identify "Crossing" Edges (Edges that connect two different modules)
+# We create a 'communities' object so igraph understands the structure
+comm <- make_clusters(g, membership = V(g)$cluster)
+is_crossing <- crossing(comm, g)
+
+# 3. Assign Weights for the Layout
+# Internal Edges (FALSE): Weight = 20 (Strong attraction -> Tight Clusters)
+# Crossing Edges (TRUE):  Weight = 0.5 (Weak attraction -> Clusters drift apart)
+E(g)$layout_weight <- ifelse(is_crossing, 0.5, 20) 
+
+# 4. Run Layout with these "Virtual Weights"
+# We use Fruchterman-Reingold because it respects weights very well
+coords <- layout_with_fr(g, 
+                         weights = E(g)$layout_weight,
+                         niter = 5000) # Give it time to sort itself out
+
+# 5. Normalize coords (Optional, helps with plotting limits)
+coords <- norm_coords(coords, ymin=-1, ymax=1, xmin=-1, xmax=1)
+
+# --- PLOTTING (Same Milke Style) ---
+milke_cols <- c("#F0E442", "#E69F00", "#56B4E9", "#009E73", "#CC79A7", 
+                "#0072B2", "#D55E00", "#999999", "white", "black")
+
+# Calculate centroids for labels
+centroid_x <- tapply(coords[,1], V(g)$cluster, mean)
+centroid_y <- tapply(coords[,2], V(g)$cluster, mean)
+
+par(mar=c(0,0,0,0))
+plot(g,
+     layout = coords,
+     vertex.size = log(V(g)$degree + 1) * 2.5, 
+     vertex.color = milke_cols[V(g)$cluster], 
+     vertex.frame.color = "black", 
+     vertex.frame.width = 1.2,
+     vertex.label = NA,
+     
+     # Edges stay faint
+     edge.width = 0.1,
+     edge.color = alpha("grey40", 0.1), 
+     edge.curved = 0.1,
+     
+     rescale = FALSE, # Important if using norm_coords
+     xlim = c(-1.1, 1.1), 
+     ylim = c(-1.1, 1.1)
+)
+
+# Add the Big Number Labels
+text(centroid_x, centroid_y, labels = names(centroid_x), 
+     cex = 2, font = 2, col = "black")
+```
+```{r}
+library(igraph)
+library(scales) # For transparency
+
+# --- STEP 1: PREPARE THE DATA ---
+
+# Extract the two adjacency matrices (weighted)
+adj_atl <- net_basin$adjaMat1
+adj_pac <- net_basin$adjaMat2
+
+# 1. Align the matrices to the same set of nodes (The Union)
+# This ensures Row 1 is "Bacteria_A" in both matrices.
+all_taxa <- unique(c(rownames(adj_atl), rownames(adj_pac)))
+n_taxa <- length(all_taxa)
+
+# Helper function to align matrix to all_taxa
+align_matrix <- function(adj, all_names) {
+  new_mat <- matrix(0, nrow=length(all_names), ncol=length(all_names), 
+                    dimnames=list(all_names, all_names))
+  # Fill in the data we have
+  common <- intersect(rownames(adj), all_names)
+  new_mat[common, common] <- adj[common, common]
+  return(new_mat)
+}
+
+adj_atl_full <- align_matrix(adj_atl, all_taxa)
+adj_pac_full <- align_matrix(adj_pac, all_taxa)
+
+# 2. Create the Graphs
+g_atl <- graph_from_adjacency_matrix(adj_atl_full, mode="undirected", weighted=TRUE)
+g_pac <- graph_from_adjacency_matrix(adj_pac_full, mode="undirected", weighted=TRUE)
+
+# 3. Create the "Union" Graph for the Layout
+# We sum the matrices so the layout respects connections from BOTH oceans
+adj_union <- adj_atl_full + adj_pac_full
+g_union <- graph_from_adjacency_matrix(adj_union, mode="undirected", weighted=TRUE)
+
+# --- STEP 2: CALCULATE THE MASTER LAYOUT ---
+
+# Remove negative edges from layout calculation (avoids crunching)
+g_union_clean <- delete.edges(g_union, E(g_union)[weight < 0])
+
+# Assign clusters (Using Atlantic modules to define the "Islands")
+# Note: You could also calculate new clusters on g_union if you prefer
+# We map the Atlantic clusters to the full node list, filling NAs with 0
+clust_map <- setNames(rep(0, n_taxa), all_taxa)
+# Assuming 'props_basin' has the Atlantic clustering
+atl_clust <- props_season$clustering$clust1 
+clust_map[names(atl_clust)] <- atl_clust
+V(g_union_clean)$cluster <- clust_map[V(g_union_clean)$name]
+
+# Apply the "Physics Hack" (Strong internal gravity, weak external)
+comm <- make_clusters(g_union_clean, membership = V(g_union_clean)$cluster)
+is_crossing <- crossing(comm, g_union_clean)
+E(g_union_clean)$layout_weight <- ifelse(is_crossing, 0.2, 20) # 100x difference
+
+# Run the Layout (ONCE)
+set.seed(123) # For reproducibility
+coords_master <- layout_with_fr(g_union_clean, weights = E(g_union_clean)$layout_weight, niter=5000)
+coords_master <- norm_coords(coords_master, ymin=-1, ymax=1, xmin=-1, xmax=1)
+
+# --- STEP 3: PLOT SIDE-BY-SIDE ---
+
+# Setup colors (Milke Palette)
+milke_cols <- c("#F0E442", "#E69F00", "#56B4E9", "#009E73", "#CC79A7", 
+                "#0072B2", "#D55E00", "#999999", "white", "black")
+
+# Calculate degrees for sizing (specific to each ocean)
+deg_atl <- degree(g_atl)
+deg_pac <- degree(g_pac)
+
+# Setup the canvas
+par(mfrow = c(1, 2), mar=c(1, 1, 3, 1))
+
+# --- PLOT 1: ATLANTIC ---
+plot(g_atl,
+     layout = coords_master,  # <--- USING MASTER COORDS
+     
+     # Nodes (Sized by Atlantic Degree)
+     vertex.size = ifelse(deg_atl > 0, log(deg_atl + 1) * 2.5, 0), # Hide nodes if degree is 0
+     vertex.color = milke_cols[V(g_union_clean)$cluster], # Keep consistent colors
+     vertex.frame.color = ifelse(deg_atl > 0, "black", NA),
+     vertex.label = NA,
+     
+     # Edges (Atlantic only)
+     edge.width = 0.1,
+     edge.color = alpha("grey40", 0.15),
+     
+     main = "Atlantic Network",
+     xlim = c(-1.1, 1.1), ylim = c(-1.1, 1.1), rescale=FALSE
+)
+
+# Add Labels (Atlantic)
+# Calculate centroids based on visible nodes
+# (Optional: refine this to only average x,y of nodes present in Atlantic)
+text(tapply(coords_master[,1], V(g_union_clean)$cluster, mean),
+     tapply(coords_master[,2], V(g_union_clean)$cluster, mean),
+     labels = names(tapply(coords_master[,1], V(g_union_clean)$cluster, mean)),
+     cex = 2, font = 2)
+
+
+# --- PLOT 2: PACIFIC ---
+plot(g_pac,
+     layout = coords_master,  # <--- SAME MASTER COORDS
+     
+     # Nodes (Sized by Pacific Degree)
+     # Note: Nodes present in Atlantic but missing in Pacific will disappear (size=0)
+     vertex.size = ifelse(deg_pac > 0, log(deg_pac + 1) * 2.5, 0),
+     vertex.color = milke_cols[V(g_union_clean)$cluster], 
+     vertex.frame.color = ifelse(deg_pac > 0, "black", NA),
+     vertex.label = NA,
+     
+     # Edges (Pacific only)
+     edge.width = 0.1,
+     edge.color = alpha("grey40", 0.15),
+     
+     main = "Pacific Network",
+     xlim = c(-1.1, 1.1), ylim = c(-1.1, 1.1), rescale=FALSE
+)
+
+# Add Labels (Pacific)
+text(tapply(coords_master[,1], V(g_union_clean)$cluster, mean),
+     tapply(coords_master[,2], V(g_union_clean)$cluster, mean),
+     labels = names(tapply(coords_master[,1], V(g_union_clean)$cluster, mean)),
+     cex = 2, font = 2)
+```
+
+
+
+```{r}
+# Check number of edges in Atlantic network
+nrow(net_basin$edgelist1)
+
+# Check number of edges in Pacific network
+nrow(net_basin$edgelist2)
+```
+
+
+```{r}
+library(NetCoMi)
+library(phyloseq)
+library(SpiecEasi)
+```
+
+```{r}
+
+```
+
+
+```{r}
+# Construct the network
+# measure = "spiecEasi" replaces SparCC
+# normMethod = "clr" is standard for SpiecEasi (Centered Log-Ratio)
+net <- netConstruct(ps_milici_final, 
+                    measure = "spieceasi",
+                    measurePar = list(method = "mb", 
+                                      lambda.min.ratio = 1e-2, 
+                                      nlambda = 20),
+                    normMethod = "clr", 
+                    zeroMethod = "pseudo",
+                    sparsMethod = "none", # SpiecEasi is already sparse
+                    verbose = 3)
+```
+
+```{r}
+net_comparison <- netConstruct(
+  data = filtered_list[[1]], 
+  data2 = filtered_list[[2]],  # Second dataset to compare against
+  measure = "spieceasi",
+  measurePar = list(method = "mb", nlambda = 20, lambda.min.ratio = 1e-2),
+  normMethod = "clr",
+  zeroMethod = "pseudo",
+  sparsMethod = "none", # SpiecEasi is inherently sparse
+  seed = 123
+)
+```
+```{r}
+# Extract the adjacency matrix for the first network (Atlantic)
+adj_mat <- net_comparison$adjaMat1
+
+# 1. Count total number of nodes (ASVs)
+n_nodes <- nrow(adj_mat)
+
+# 2. Count total number of edges (non-zero interactions)
+# We divide by 2 because the matrix is symmetric (A->B is same as B->A)
+n_edges <- sum(adj_mat != 0) / 2
+
+# 3. Calculate Density
+# Formula: Actual Edges / Total Possible Edges
+total_possible_edges <- (n_nodes * (n_nodes - 1)) / 2
+density <- n_edges / total_possible_edges
+
+# --- PRINT RESULTS ---
+print(paste("Nodes:", n_nodes))
+```
+
+
+
+```{r}
+props_comp <- netAnalyze(net_comparison, 
+                         clustMethod = "cluster_fast_greedy",
+                         hubPar = "eigenvector",
+                         normDeg = FALSE,
+                         centrLCC = FALSE,         # DISABLE THIS (Very Slow)
+                         connectivity = FALSE)     # DISABLE THIS
+
+spring_netprops_diet <- netAnalyze(
+    net_comparison,
+    clustMethod = "cluster_fast_greedy",
+    hubPar = "eigenvector",
+    normDeg = FALSE)
+```
+
+```{r}
+plot(props_comp, 
+     nodeColor = "cluster",   # Color nodes by their Module (Cluster)
+     nodeSize = "degree",     # Size nodes by connectivity
+     labelScale = FALSE,      # Hide labels if too crowded
+     rmSingles = TRUE,        # Remove unconnected nodes (cleaner plot)
+     title1 = "GRUMP Network Modules (SPIEC-EASI)", 
+     legend = TRUE)
+```
+
+```{r}
+for (j in 1:ncol(X)) {
+  y_hat_j = clr(X_j) ~ 1 + Temp + ...
+  residual_j = clr(X_j) - y_hat_j
+}
+```
+
+```{r}
+# --- PLOT A: NETWORK MODULES (Fig 2a) ---
+# We save the plot object ('p_modules') to extract the layout later.
+p_modules <- plot(props_comp, 
+                  nodeColor = "cluster",   # Color by Module
+                  nodeSize = "degree",     # Size by connections
+                  title1 = "A. Network Modules", 
+                  showTitle = TRUE,
+                  labelScale = FALSE,      # Turn off labels if too crowded
+                  rmSingles = TRUE,        # Hide unconnected nodes (cleaner)
+                  hubBorderCol = "darkgrey",
+                  cexLabels = 0.5)
+
+# --- EXTRACT LAYOUT ---
+# This is crucial! We grab the coordinate matrix from the first plot.
+# This ensures nodes stay in the EXACT same place for plots B, C, D.
+net_layout <- p_modules$qgraph$layout
+
+# --- PLOT B: TEMPERATURE (Fig 2b) ---
+p_temp <- plot(props_global, 
+               layout = net_layout,        # <--- REUSE LAYOUT
+               nodeColor = "feature",      # Switch to "Feature" mode
+               featVecCol = vec_temp,      # Pass the Temperature vector
+               colorVec = heat.colors(100),# Color palette (Low=Red -> High=White/Yellow)
+               # Alternatively use RColorBrewer: colorRampPalette(c("blue", "white", "red"))(100)
+               nodeSize = "degree",
+               rmSingles = TRUE,
+               title1 = "B. Temperature Preference",
+               showTitle = TRUE,
+               labelScale = FALSE)
+
+# --- PLOT C: DEPTH (Fig 2d) ---
+p_depth <- plot(props_global, 
+                layout = net_layout, 
+                nodeColor = "feature", 
+                featVecCol = vec_depth,
+                # Use a reversed palette for Depth (Light=Surface, Dark=Deep)
+                colorVec = colorRampPalette(c("lightblue", "darkblue"))(100),
+                nodeSize = "degree",
+                rmSingles = TRUE,
+                title1 = "C. Depth Preference",
+                showTitle = TRUE,
+                labelScale = FALSE)
+
+# --- PLOT D: LATITUDE (Fig 2c) ---
+p_lat <- plot(props_global, 
+              layout = net_layout, 
+              nodeColor = "feature", 
+              featVecCol = abs(vec_lat),   # Absolute Latitude (0-90)
+              colorVec = colorRampPalette(c("orange", "darkred"))(100),
+              nodeSize = "degree",
+              rmSingles = TRUE,
+              title1 = "D. Latitude Preference",
+              showTitle = TRUE,
+              labelScale = FALSE)
+```

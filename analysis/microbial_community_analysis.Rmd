@@ -1,0 +1,563 @@
+---
+title: 'Microbial Community Analysis: Taxonomy and Environmental Covariates'
+author: "Maximilian Frei"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+# Overview
+
+This document analyses the **consensus communities** produced in `community_detection.Rmd`. We do not use metadata to *validate* the partition (structural communities need not align with taxonomy or environment); instead we *interpret* the modules using:
+
+1. **Taxonomy** — Which phyla, classes, or other ranks are over- or under-represented in each community? This helps attach ecological meaning to the structural modules.
+
+2. **Environmental covariates** — Node-level features (temperature, salinity, depth, oxygen) summarise the typical environment where each ASV was observed. We summarise these by community (e.g. mean temperature per module) and compare across modules and basins.
+
+3. **Basin comparison** — How do Atlantic and Pacific consensus communities differ in size, taxonomic composition, and environmental profiles?
+
+**Inputs:** `results/atlantic_consensus_communities.csv`, `results/pacific_consensus_communities.csv` (from `community_detection.Rmd`), `data/export/estimated_network/node_features_*.csv`, and `data/export/estimated_network/otu_tax_table_all.csv`.
+
+# Load and merge data
+
+```{r load}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(igraph)
+library(scales)
+
+# Consensus communities (node, community)
+atl_comm <- read.csv("results/atlantic_consensus_communities.csv")
+pac_comm <- read.csv("results/pacific_consensus_communities.csv")
+
+# Node-level environmental features (Taxa = ASV id, Temperature, Salinity, depth, Oxygen, etc.)
+atl_feat <- read.csv("data/export/estimated_network/node_features_atlantic.csv")
+pac_feat <- read.csv("data/export/estimated_network/node_features_pacific.csv")
+
+# Taxonomy (first column = ASV id, then Domain, Phylum, Class, ...)
+tax <- read.csv("data/export/estimated_network/otu_tax_table_all.csv")
+# Ensure ASV column name for join (often first col is unnamed or "X")
+if (colnames(tax)[1] == "X" || colnames(tax)[1] == "") {
+  colnames(tax)[1] <- "node"
+} else {
+  tax <- tax %>% rename(node = 1)
+}
+
+# Merge: community + features + taxonomy (Atlantic)
+atl <- atl_comm %>%
+  left_join(atl_feat, by = c("node" = "Taxa")) %>%
+  left_join(tax, by = "node")
+
+# Merge: community + features + taxonomy (Pacific)
+pac <- pac_comm %>%
+  left_join(pac_feat, by = c("node" = "Taxa")) %>%
+  left_join(tax, by = "node")
+
+cat("Atlantic: ", nrow(atl), " nodes in ", n_distinct(atl$community), " consensus communities\n", sep = "")
+cat("Pacific:  ", nrow(pac), " nodes in ", n_distinct(pac$community), " consensus communities\n", sep = "")
+```
+
+# Taxonomic composition of communities
+
+We summarise taxonomy (e.g. Phylum, Class) within each consensus community. This is for *interpretation*: do structural modules reflect known taxonomic or functional groups?
+
+## Phylum composition per community (Atlantic)
+
+```{r taxonomy-atlantic}
+# Count Phylum (or Class if Phylum is empty) per community
+atl_tax <- atl %>%
+  mutate(tax_label = if_else(Phylum != "" & !is.na(Phylum), Phylum, Class)) %>%
+  mutate(tax_label = if_else(tax_label != "" & !is.na(tax_label), tax_label, "Unassigned"))
+
+phyla_per_comm_atl <- atl_tax %>%
+  count(community, tax_label, name = "n") %>%
+  group_by(community) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+# Show largest communities with top phyla
+phyla_per_comm_atl %>%
+  filter(community %in% head(sort(unique(community), decreasing = TRUE), 10)) %>%
+  arrange(community, -n) %>%
+  group_by(community) %>%
+  slice_head(n = 5) %>%
+  kable(digits = 1, caption = "Atlantic: top 5 phyla/classes in first 10 communities (by size)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Phylum composition per community (Pacific)
+
+```{r taxonomy-pacific}
+pac_tax <- pac %>%
+  mutate(tax_label = if_else(Phylum != "" & !is.na(Phylum), Phylum, Class)) %>%
+  mutate(tax_label = if_else(tax_label != "" & !is.na(tax_label), tax_label, "Unassigned"))
+
+phyla_per_comm_pac <- pac_tax %>%
+  count(community, tax_label, name = "n") %>%
+  group_by(community) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+phyla_per_comm_pac %>%
+  filter(community %in% head(sort(unique(community), decreasing = TRUE), 10)) %>%
+  arrange(community, -n) %>%
+  group_by(community) %>%
+  slice_head(n = 5) %>%
+  kable(digits = 1, caption = "Pacific: top 5 phyla/classes in first 10 communities (by size)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Bar charts: Phylum distribution by community (example)
+
+```{r taxonomy-bar, fig.height=8, fig.width=12}
+# Top 8 communities by size in each basin; show Phylum distribution
+top_comm_atl <- atl_tax %>% count(community, name = "size") %>% slice_max(size, n = 8) %>% pull(community)
+top_comm_pac <- pac_tax %>% count(community, name = "size") %>% slice_max(size, n = 8) %>% pull(community)
+
+p_atl <- phyla_per_comm_atl %>%
+  filter(community %in% top_comm_atl) %>%
+  ggplot(aes(x = factor(community), y = pct, fill = tax_label)) +
+  geom_col() +
+  labs(x = "Community", y = "% of community", fill = "Phylum/Class", title = "Atlantic: taxonomic composition (top 8 communities)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0), legend.position = "right")
+
+p_pac <- phyla_per_comm_pac %>%
+  filter(community %in% top_comm_pac) %>%
+  ggplot(aes(x = factor(community), y = pct, fill = tax_label)) +
+  geom_col() +
+  labs(x = "Community", y = "% of community", fill = "Phylum/Class", title = "Pacific: taxonomic composition (top 8 communities)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0), legend.position = "right")
+
+print(p_atl)
+print(p_pac)
+```
+
+# Environmental covariates by community
+
+Each node has associated environmental summaries (mean temperature, salinity, depth, oxygen across samples where that ASV was observed). We summarise these *by consensus community* to see whether modules have distinct environmental niches.
+
+## Summary: mean Temperature, Salinity, depth, Oxygen per community
+
+```{r env-summary}
+env_atl <- atl %>%
+  group_by(community) %>%
+  summarise(
+    n = n(),
+    mean_temp = mean(Temperature, na.rm = TRUE),
+    mean_sal = mean(Salinity, na.rm = TRUE),
+    mean_depth = mean(depth, na.rm = TRUE),
+    mean_oxygen = mean(Oxygen, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(basin = "Atlantic")
+
+env_pac <- pac %>%
+  group_by(community) %>%
+  summarise(
+    n = n(),
+    mean_temp = mean(Temperature, na.rm = TRUE),
+    mean_sal = mean(Salinity, na.rm = TRUE),
+    mean_depth = mean(depth, na.rm = TRUE),
+    mean_oxygen = mean(Oxygen, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(basin = "Pacific")
+
+# Show first 10 communities per basin
+bind_rows(env_atl, env_pac) %>%
+  group_by(basin) %>%
+  slice_head(n = 10) %>%
+  kable(digits = 2, caption = "Mean environmental covariates per community (first 10 per basin)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Boxplots: Temperature and Salinity by community (Atlantic)
+
+```{r env-box-atlantic, fig.height=6, fig.width=10}
+# Top 12 communities by size
+top12_atl <- atl_tax %>% count(community, name = "size") %>% slice_max(size, n = 12) %>% pull(community)
+
+atl %>%
+  filter(community %in% top12_atl) %>%
+  ggplot(aes(x = factor(community), y = Temperature, fill = factor(community))) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(x = "Community", y = "Temperature (°C)", title = "Atlantic: temperature distribution by consensus community") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Boxplots: Temperature and Salinity by community (Pacific)
+
+```{r env-box-pacific, fig.height=6, fig.width=10}
+top12_pac <- pac_tax %>% count(community, name = "size") %>% slice_max(size, n = 12) %>% pull(community)
+
+pac %>%
+  filter(community %in% top12_pac) %>%
+  ggplot(aes(x = factor(community), y = Temperature, fill = factor(community))) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(x = "Community", y = "Temperature (°C)", title = "Pacific: temperature distribution by consensus community") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Basin comparison
+
+Compare Atlantic vs Pacific: number of consensus communities, community size distribution, and (optionally) basin-level summaries of environmental profiles.
+
+```{r basin-comparison}
+basin_summary <- bind_rows(
+  atl %>% mutate(basin = "Atlantic") %>% select(basin, community, Temperature, Salinity, depth, Oxygen),
+  pac %>% mutate(basin = "Pacific") %>% select(basin, community, Temperature, Salinity, depth, Oxygen)
+) %>%
+  group_by(basin, community) %>%
+  summarise(
+    n = n(),
+    mean_temp = mean(Temperature, na.rm = TRUE),
+    mean_sal = mean(Salinity, na.rm = TRUE),
+    mean_depth = mean(depth, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Per-basin: n communities, total nodes, mean community size
+basin_comparison <- basin_summary %>%
+  group_by(basin) %>%
+  summarise(
+    n_communities = n(),
+    total_nodes = sum(n),
+    mean_community_size = mean(n),
+    median_community_size = median(n),
+    .groups = "drop"
+  )
+basin_comparison %>%
+  kable(digits = 1, caption = "Atlantic vs Pacific: consensus community summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Export summary for thesis / reporting (so numbers are in one place)
+dir.create("results", showWarnings = FALSE)
+sink("results/microbial_community_summary.md")
+cat("# Microbial community analysis summary\n")
+cat("Generated:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n\n")
+cat("## Consensus communities per basin\n\n")
+cat("| Basin | N_communities | Total_nodes | Mean_community_size | Median_community_size |\n")
+cat("|-------|---------------|-------------|---------------------|------------------------|\n")
+for (i in 1:nrow(basin_comparison)) {
+  cat(sprintf("| %s | %d | %d | %.1f | %.1f |\n",
+    basin_comparison$basin[i], basin_comparison$n_communities[i], basin_comparison$total_nodes[i],
+    basin_comparison$mean_community_size[i], basin_comparison$median_community_size[i]))
+}
+sink()
+cat("Summary written to results/microbial_community_summary.md\n")
+```
+
+# Distribution of modules by latitude (node-based)
+
+Proportion of ASVs (nodes) in each consensus module by mean latitude. This is *node-based*: each ASV has one mean latitude (across samples where it was observed); we bin by latitude and plot the proportion of nodes in each module per bin. Not read abundance—if you have sample × ASV counts later, you can add a read-based version.
+
+```{r abundance-by-lat}
+# Bind Atlantic and Pacific; keep node, community, lat (and depth for optional faceting)
+lat_breaks <- seq(-65, 70, by = 10)
+lat_midpoints <- (lat_breaks[-length(lat_breaks)] + lat_breaks[-1]) / 2
+
+dd_lat <- bind_rows(
+  atl %>% mutate(basin = "Atlantic") %>% select(basin, node, community, lat),
+  pac %>% mutate(basin = "Pacific")  %>% select(basin, node, community, lat)
+) %>%
+  filter(!is.na(lat)) %>%
+  mutate(lat_bin = cut(lat, breaks = lat_breaks, include.lowest = TRUE)) %>%
+  count(basin, lat_bin, community, name = "n") %>%
+  group_by(basin, lat_bin) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(community = factor(community, levels = sort(unique(community)))) %>%
+  mutate(lat_mid = lat_midpoints[as.numeric(lat_bin)])
+```
+
+```{r abundance-plot-lat, fig.width=10, fig.height=5, echo=TRUE}
+# Stacked area: x = latitude (midpoint of bin), y = % of ASVs, fill = module; facet by basin
+n_comm <- n_distinct(dd_lat$community)
+pal_mod <- setNames(rainbow(n_comm), levels(dd_lat$community))
+
+p_abund <- ggplot(dd_lat, aes(x = lat_mid, y = pct, fill = community)) +
+  geom_area(position = "stack", alpha = 0.85) +
+  facet_wrap(~ basin, ncol = 1, strip.position = "top") +
+  scale_fill_manual(values = pal_mod, name = "Module") +
+  scale_x_continuous(breaks = lat_midpoints, minor_breaks = NULL) +
+  labs(x = "Mean latitude (°)", y = "Proportion of ASVs (%)",
+       title = "Distribution of consensus modules by mean latitude (node-based)") +
+  theme_minimal() +
+  theme(legend.position = "right", strip.text = element_text(face = "bold"))
+print(p_abund)
+# Not saved for thesis: Atlantic and Pacific modules are from separate consensus runs, so module numbers are not comparable across basins; a combined plot would be misleading.
+```
+
+Optional: same idea by depth (e.g. shallow vs deep). We bin nodes by mean depth and plot proportion per module per depth bin, faceted by basin.
+
+```{r abundance-by-depth, fig.width=10, fig.height=5, echo=TRUE}
+depth_breaks <- c(0, 50, 100, 200)
+depth_midpoints <- (depth_breaks[-length(depth_breaks)] + depth_breaks[-1]) / 2
+
+dd_depth <- bind_rows(
+  atl %>% mutate(basin = "Atlantic") %>% select(basin, node, community, depth),
+  pac %>% mutate(basin = "Pacific")  %>% select(basin, node, community, depth)
+) %>%
+  filter(!is.na(depth), depth >= 0) %>%
+  mutate(depth_bin = cut(depth, breaks = depth_breaks, include.lowest = TRUE)) %>%
+  count(basin, depth_bin, community, name = "n") %>%
+  group_by(basin, depth_bin) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(community = factor(community, levels = sort(unique(community)))) %>%
+  mutate(depth_mid = depth_midpoints[as.numeric(depth_bin)])
+
+p_depth <- ggplot(dd_depth, aes(x = depth_mid, y = pct, fill = community)) +
+  geom_area(position = "stack", alpha = 0.85) +
+  facet_wrap(~ basin, ncol = 1) +
+  scale_fill_manual(values = pal_mod, name = "Module") +
+  scale_x_continuous(breaks = depth_midpoints) +
+  labs(x = "Mean depth (m)", y = "Proportion of ASVs (%)",
+       title = "Distribution of consensus modules by mean depth (node-based)") +
+  theme_minimal() +
+  theme(legend.position = "right", strip.text = element_text(face = "bold"))
+print(p_depth)
+```
+
+# Network visualization (Fig 2 style): same layout, multiple colorings
+
+We plot the co-occurrence network once with a fixed layout, then color nodes by (a) consensus community, (b)–(e) environmental variables (temperature, absolute latitude, depth, salinity), and (f) taxonomy (Class). Node size reflects degree (number of edges). We use **igraph** from the same edgelists as in `community_detection.Rmd`; NetCoMi could be used instead if the network were built and saved with NetCoMi.
+
+```{r fig2-setup}
+# Build graph from edgelist (same data as load chunk); use atl from load chunk
+atlantic_edges <- read.csv("data/export/estimated_network/atlantic_edgelist.csv")
+g_atl <- graph_from_data_frame(atlantic_edges[, c("v1", "v2", "adja")], directed = FALSE)
+E(g_atl)$weight <- abs(E(g_atl)$adja)
+
+# Align atl to graph node order (atl already has one row per node from load)
+atl_ord <- atl %>% filter(node %in% V(g_atl)$name) %>% slice(match(V(g_atl)$name, node))
+idx <- match(V(g_atl)$name, atl_ord$node)
+if (any(is.na(idx))) stop("Graph and atl node lists differ. Knit from the analysis/ folder (same as load chunk).")
+V(g_atl)$community <- atl_ord$community[idx]
+V(g_atl)$Temperature <- atl_ord$Temperature[idx]
+V(g_atl)$lat <- atl_ord$lat[idx]
+V(g_atl)$depth <- atl_ord$depth[idx]
+V(g_atl)$Salinity <- atl_ord$Salinity[idx]
+V(g_atl)$Phylum   <- ifelse(atl_ord$Phylum[idx] != "" & !is.na(atl_ord$Phylum[idx]), as.character(atl_ord$Phylum[idx]), "Unassigned")
+V(g_atl)$Class    <- ifelse(atl_ord$Class[idx] != "" & !is.na(atl_ord$Class[idx]), as.character(atl_ord$Class[idx]), "Unassigned")
+V(g_atl)$degree   <- degree(g_atl)
+
+# Layout (Fruchterman-Reingold); scale coords to spread nodes and reduce clumping
+set.seed(42)
+coords_atl <- layout_with_fr(g_atl, weights = E(g_atl)$weight, niter = 1000)
+coords_atl <- coords_atl * 6
+```
+
+```{r fig2-plot-atlantic, fig.width=8, fig.height=12, echo=TRUE}
+# Shared plot defaults: no labels, thin grey edges, node size by degree
+plot_net_panel <- function(g, coords, vertex_color, main, leg_title = NULL, discrete_legend = FALSE, pal = NULL) {
+  par(mar = c(0.5, 0.5, 2, 0.5))
+  plot(g, layout = coords,
+       vertex.size = log1p(V(g)$degree) * 1.2,
+       vertex.label = NA,
+       vertex.frame.color = "black",
+       vertex.color = vertex_color,
+       edge.width = 0.3,
+       edge.color = alpha("grey50", 0.25),
+       main = main)
+  if (discrete_legend && !is.null(leg_title)) {
+    u <- unique(vertex_color)
+    u <- u[!is.na(u)]
+    if (length(u) <= 20) legend("topleft", legend = names(pal)[names(pal) %in% u], fill = pal[names(pal) %in% u], cex = 0.5, bty = "n", title = leg_title)
+  }
+}
+
+n_comm <- length(unique(atl$community))
+pal_comm <- setNames(rainbow(n_comm), sort(unique(atl$community)))
+V(g_atl)$col_community <- pal_comm[as.character(V(g_atl)$community)]
+
+# Continuous: map value to color gradient (100 steps)
+cont_to_col <- function(x, pal_fun) {
+  x <- as.numeric(x)
+  x <- (x - min(x, na.rm = TRUE)) / (diff(range(x, na.rm = TRUE)) + 1e-9)
+  x[is.na(x)] <- 0.5
+  pal_fun(100)[pmin(100, pmax(1, round(x * 99) + 1))]
+}
+V(g_atl)$col_temp   <- cont_to_col(V(g_atl)$Temperature, colorRampPalette(c("blue", "white", "red")))
+V(g_atl)$col_lat    <- cont_to_col(abs(V(g_atl)$lat),    colorRampPalette(c("lightyellow", "orange", "darkred")))
+V(g_atl)$col_depth  <- cont_to_col(V(g_atl)$depth,      colorRampPalette(c("lightblue", "darkblue")))
+V(g_atl)$col_sal    <- cont_to_col(V(g_atl)$Salinity,   colorRampPalette(c("lightblue", "yellow", "red")))
+
+# Taxonomy: discrete colors per Class (top levels by count, rest "Other")
+classes <- names(sort(table(V(g_atl)$Class), decreasing = TRUE))
+top_classes <- head(classes[classes != "Unassigned"], 10)
+V(g_atl)$Class_plot <- ifelse(V(g_atl)$Class %in% top_classes, V(g_atl)$Class, "Other")
+pal_class <- setNames(rainbow(length(unique(V(g_atl)$Class_plot))), sort(unique(V(g_atl)$Class_plot)))
+V(g_atl)$col_class <- pal_class[V(g_atl)$Class_plot]
+
+# Multi-panel: 3 rows x 2 columns (6 panels); full network visible
+par(mfrow = c(3, 2), oma = c(0, 0, 1, 0))
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_community, "a | Network modules (consensus)")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_temp,      "b | Temperature")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_lat,       "c | Abs. latitude")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_depth,     "d | Depth")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_sal,       "e | Salinity")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_class,     "f | Class")
+title(main = "Atlantic: co-occurrence network (same layout)", outer = TRUE, cex.main = 1.2)
+par(mfrow = c(1, 1))
+```
+
+```{r fig2-save-atlantic, echo=TRUE}
+# Save to thesis fig folder (for paper); backup existing so it's not overwritten
+fig_dir <- "../thesis/fig"
+dir.create(fig_dir, showWarnings = FALSE)
+atl_pdf <- file.path(fig_dir, "network_atlantic_panels.pdf")
+if (file.exists(atl_pdf)) {
+  file.copy(atl_pdf, file.path(fig_dir, "network_atlantic_panels_previous.pdf"), overwrite = TRUE)
+  cat("Backed up existing to network_atlantic_panels_previous.pdf\n")
+}
+pdf(atl_pdf, width = 8, height = 12)
+par(mfrow = c(3, 2), oma = c(0, 0, 1, 0))
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_community, "a | Network modules (consensus)")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_temp,      "b | Temperature")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_lat,       "c | Abs. latitude")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_depth,     "d | Depth")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_sal,       "e | Salinity")
+plot_net_panel(g_atl, coords_atl, V(g_atl)$col_class,     "f | Class")
+title(main = "Atlantic: co-occurrence network (same layout)", outer = TRUE, cex.main = 1.2)
+par(mfrow = c(1, 1))
+dev.off()
+cat("Saved: thesis/fig/network_atlantic_panels.pdf\n")
+```
+
+```{r fig2-save-atlantic-individual, echo=TRUE}
+# Save each Atlantic panel as a separate PDF (one panel per file = full plot region, better spacing).
+# 6 panels: a–f (modules, temperature, abs_latitude, depth, salinity, class).
+fig_dir <- "../thesis/fig"
+panels <- data.frame(
+  letter = c("a", "b", "c", "d", "e", "f"),
+  slug   = c("modules", "temperature", "abs_latitude", "depth", "salinity", "class"),
+  title  = c("a | Network modules (consensus)", "b | Temperature", "c | Abs. latitude", "d | Depth", "e | Salinity", "f | Class"),
+  attr   = c("col_community", "col_temp", "col_lat", "col_depth", "col_sal", "col_class"),
+  stringsAsFactors = FALSE
+)
+dir.create("results/network_panels_atlantic", showWarnings = FALSE, recursive = TRUE)
+for (i in 1:nrow(panels)) {
+  base_name <- sprintf("network_atlantic_panel_%s_%s.pdf", panels$letter[i], panels$slug[i])
+  # Save to thesis/fig for the paper (cropped view)
+  f_thesis <- file.path(fig_dir, base_name)
+  pdf(f_thesis, width = 8, height = 7)
+  plot_net_panel(g_atl, coords_atl, vertex_attr(g_atl, panels$attr[i]), panels$title[i])
+  dev.off()
+  # Also save to analysis/results so you can find them easily
+  f_results <- file.path("results", "network_panels_atlantic", base_name)
+  file.copy(f_thesis, f_results, overwrite = TRUE)
+  cat("Saved:", f_thesis, "and", f_results, "\n")
+}
+cat("Atlantic: 6 individual panels in thesis/fig/ and results/network_panels_atlantic/\n")
+```
+
+## Pacific: same 7-panel figure
+
+```{r fig2-pacific, fig.width=8, fig.height=12, echo=TRUE}
+pacific_edges <- read.csv("data/export/estimated_network/pacific_edgelist.csv")
+g_pac <- graph_from_data_frame(pacific_edges[, c("v1", "v2", "adja")], directed = FALSE)
+E(g_pac)$weight <- abs(E(g_pac)$adja)
+
+pac_ord <- pac %>% filter(node %in% V(g_pac)$name) %>% slice(match(V(g_pac)$name, node))
+idx_pac <- match(V(g_pac)$name, pac_ord$node)
+if (any(is.na(idx_pac))) stop("Graph and pac node lists differ. Knit from the analysis/ folder.")
+V(g_pac)$community <- pac_ord$community[idx_pac]
+V(g_pac)$Temperature <- pac_ord$Temperature[idx_pac]
+V(g_pac)$lat <- pac_ord$lat[idx_pac]
+V(g_pac)$depth <- pac_ord$depth[idx_pac]
+V(g_pac)$Salinity <- pac_ord$Salinity[idx_pac]
+V(g_pac)$Phylum   <- ifelse(pac_ord$Phylum[idx_pac] != "" & !is.na(pac_ord$Phylum[idx_pac]), as.character(pac_ord$Phylum[idx_pac]), "Unassigned")
+V(g_pac)$Class    <- ifelse(pac_ord$Class[idx_pac] != "" & !is.na(pac_ord$Class[idx_pac]), as.character(pac_ord$Class[idx_pac]), "Unassigned")
+V(g_pac)$degree   <- degree(g_pac)
+
+set.seed(42)
+coords_pac <- layout_with_fr(g_pac, weights = E(g_pac)$weight, niter = 1000)
+coords_pac <- coords_pac * 6
+
+n_comm_pac <- length(unique(pac$community))
+pal_comm_pac <- setNames(rainbow(n_comm_pac), sort(unique(pac$community)))
+V(g_pac)$col_community <- pal_comm_pac[as.character(V(g_pac)$community)]
+V(g_pac)$col_temp   <- cont_to_col(V(g_pac)$Temperature, colorRampPalette(c("blue", "white", "red")))
+V(g_pac)$col_lat    <- cont_to_col(abs(V(g_pac)$lat),    colorRampPalette(c("lightyellow", "orange", "darkred")))
+V(g_pac)$col_depth  <- cont_to_col(V(g_pac)$depth,      colorRampPalette(c("lightblue", "darkblue")))
+V(g_pac)$col_sal    <- cont_to_col(V(g_pac)$Salinity,   colorRampPalette(c("lightblue", "yellow", "red")))
+
+classes_pac <- names(sort(table(V(g_pac)$Class), decreasing = TRUE))
+top_classes_pac <- head(classes_pac[classes_pac != "Unassigned"], 10)
+V(g_pac)$Class_plot <- ifelse(V(g_pac)$Class %in% top_classes_pac, V(g_pac)$Class, "Other")
+pal_class_pac <- setNames(rainbow(length(unique(V(g_pac)$Class_plot))), sort(unique(V(g_pac)$Class_plot)))
+V(g_pac)$col_class <- pal_class_pac[V(g_pac)$Class_plot]
+
+par(mfrow = c(3, 2), oma = c(0, 0, 1, 0))
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_community, "a | Network modules (consensus)")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_temp,      "b | Temperature")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_lat,       "c | Abs. latitude")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_depth,    "d | Depth")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_sal,       "e | Salinity")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_class,     "f | Class")
+title(main = "Pacific: co-occurrence network (same layout)", outer = TRUE, cex.main = 1.2)
+par(mfrow = c(1, 1))
+
+# Backup existing Pacific plot before overwriting
+pac_pdf <- file.path("../thesis/fig", "network_pacific_panels.pdf")
+if (file.exists(pac_pdf)) {
+  file.copy(pac_pdf, file.path("../thesis/fig", "network_pacific_panels_previous.pdf"), overwrite = TRUE)
+  cat("Backed up existing to network_pacific_panels_previous.pdf\n")
+}
+pdf(pac_pdf, width = 8, height = 12)
+par(mfrow = c(3, 2), oma = c(0, 0, 1, 0))
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_community, "a | Network modules (consensus)")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_temp,      "b | Temperature")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_lat,       "c | Abs. latitude")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_depth,    "d | Depth")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_sal,       "e | Salinity")
+plot_net_panel(g_pac, coords_pac, V(g_pac)$col_class,     "f | Class")
+title(main = "Pacific: co-occurrence network (same layout)", outer = TRUE, cex.main = 1.2)
+par(mfrow = c(1, 1))
+dev.off()
+cat("Saved: thesis/fig/network_pacific_panels.pdf\n")
+```
+
+```{r fig2-save-pacific-individual, echo=TRUE}
+# Save each Pacific panel as a separate PDF (6 panels: a–f)
+fig_dir <- "../thesis/fig"
+panels_pac <- data.frame(
+  letter = c("a", "b", "c", "d", "e", "f"),
+  slug   = c("modules", "temperature", "abs_latitude", "depth", "salinity", "class"),
+  title  = c("a | Network modules (consensus)", "b | Temperature", "c | Abs. latitude", "d | Depth", "e | Salinity", "f | Class"),
+  attr   = c("col_community", "col_temp", "col_lat", "col_depth", "col_sal", "col_class"),
+  stringsAsFactors = FALSE
+)
+dir.create("results/network_panels_pacific", showWarnings = FALSE, recursive = TRUE)
+for (i in 1:nrow(panels_pac)) {
+  base_name <- sprintf("network_pacific_panel_%s_%s.pdf", panels_pac$letter[i], panels_pac$slug[i])
+  f_thesis <- file.path(fig_dir, base_name)
+  pdf(f_thesis, width = 8, height = 7)
+  plot_net_panel(g_pac, coords_pac, vertex_attr(g_pac, panels_pac$attr[i]), panels_pac$title[i])
+  dev.off()
+  f_results <- file.path("results", "network_panels_pacific", base_name)
+  file.copy(f_thesis, f_results, overwrite = TRUE)
+  cat("Saved:", f_thesis, "and", f_results, "\n")
+}
+cat("Pacific: 6 individual panels in thesis/fig/ and results/network_panels_pacific/\n")
+```
+
+---
+
+**Interpretation:** Use the taxonomy and environmental summaries to describe what each module might represent ecologically (e.g. warm-surface vs deep/cold assemblages, or phylum-dominated groups). Remember: we interpret structure with metadata; we do not judge success by alignment with taxonomy (Fortunato and Hric 2016).

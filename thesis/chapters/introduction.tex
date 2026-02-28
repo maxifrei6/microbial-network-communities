@@ -1,0 +1,37 @@
+\subsection{Background on Community Detection}
+
+
+Detecting communities in networks is one of the most studied and most difficult problems in network science \citep{Fortunato_2016}. A central challenge is that there is no unique, rigorous definition of what a ``community'' is or what it means for a node to belong to one. The notion is inherently context-dependent and method-dependent, and different methods encode different notions of community \citep{Fortunato_2016}. In this sense the problem is ill-posed. No algorithm is universally optimal, and results must be interpreted in context \citep{Fortunato_2016}.
+
+
+In formal terms, the problem is to partition a network into groups of densely connected nodes, with only sparse connections between groups \citep{Blondel_2008}. Precise formulations of this optimisation problem are known to be computationally intractable, so in practice one relies on heuristics that find reasonably good partitions in a reasonably fast way \citep{Blondel_2008}. \citet{Blondel_2008} distinguish three broad types of algorithms: \emph{divisive} methods identify and remove inter-community links (e.g.\ edge-betweenness), \emph{agglomerative} methods merge similar nodes or communities recursively, and \emph{optimisation} methods maximise an objective function such as modularity. The search for fast, scalable algorithms has attracted much interest with the increasing availability of large network data sets \citep{Blondel_2008}.
+
+
+% Visualisations (to add): small schematic network with two or three clear communities, simple graph and adjacency matrix to illustrate notation.
+
+
+\subsection{Overview of Fortunato \& Hric (2016)}
+
+
+\citet{Fortunato_2016} published a landmark user guide to community detection in \emph{Physics Reports} in 2016. Their work presents a critical analysis of the problem intended for practitioners but accessible to readers with basic notions of network science. It is not an exhaustive survey but focuses on general aspects in the light of recent findings and gives advice on the usage of popular algorithm classes. The review surveys the main classes of methods and the underlying theory (definitions of community, validation and benchmarks, detectability, and a critical discussion of modularity, flow-based and spectral approaches) and gives practical recommendations for choosing and evaluating algorithms. We adopt this user-guide perspective: we do not propose a new method but apply and compare existing ones, with an emphasis on validation and consensus clustering. Broader surveys of network clustering are cited in \citet{Fortunato_2016}.
+
+
+\subsection{Marine Microbial Networks and the GRUMP Database}
+
+
+Networks are widely used to represent associations among microbial taxa in marine systems, with nodes as taxa (e.g.\ amplicon sequencing variants, ASVs) and edges as co-occurrence or inferred interactions. Such networks capture which taxa tend to co-occur across samples and can reveal structure that is invisible from taxonomy or single-sample diversity alone. Detecting communities in these networks can suggest functionally or environmentally coherent groups and support comparative questions across regions or time.
+
+
+The Global Repeating Upper-ocean Microbial Patterns (GRUMP) database \citep{McNichol_2025} provides a large, standardized resource of plankton metabarcoding data from ocean cruises, covering bacteria, archaea, and eukaryotes. Data are processed in a consistent way, so that association networks built from GRUMP are comparable across ocean basins. This makes GRUMP well suited for asking whether microbial co-occurrence structure and its modular organisation differ between regions such as the Atlantic and the Pacific.
+
+
+\subsection{Research Questions}
+
+
+The goal of this paper is to compare microbial ASV networks (bacteria, archaea, and eukaryotes) across ocean basins (e.g.\ Atlantic vs Pacific), estimate modularity under different community-detection methods, and enrich the analysis with biological and environmental features. We ask, first, whether the two basins differ in the strength and organisation of modular structure (as measured by modularity and the number and size of communities). Second, we compare several detection algorithms and use consensus clustering to obtain a stable partition for interpretation, so that results do not depend on a single run of one method. Third, we interpret the detected modules using taxonomy (e.g.\ phylum, class) and node-level environmental summaries (temperature, salinity, depth, oxygen), without treating agreement with metadata as a validation criterion; the aim is to attach ecological meaning to the structural partition and to compare how modules align with environmental or taxonomic gradients in each basin.
+
+
+\subsection{Structure of this Paper}
+
+
+The rest of the paper is organised as follows. The \textbf{Introduction} has outlined the motivation and research questions. The \textbf{Methods} section follows the logic of \citet{Fortunato_2016}: it presents the theoretical framework for community detection---definitions of community, null models, and algorithms---with the formulas needed for the subsequent analysis, so that the choices made for the GRUMP networks are well grounded. The \textbf{Results} section first describes the data and networks (GRUMP-derived Atlantic and Pacific ASV association networks) and their basic statistics. It then reports community structure and modularity under different detection algorithms, including algorithm comparison and consensus clustering, and finally discusses ecological interpretation and basin comparison. The \textbf{Conclusion} summarises the findings, methodological lessons, and limitations.

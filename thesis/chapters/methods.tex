@@ -1,0 +1,233 @@
+This section lays the groundwork for the microbial network analysis by reviewing the theory of community detection in networks. We follow the framework of \citet{Fortunato_2016} and related literature, including key definitions (graphs, communities, null models), generative models such as the stochastic block model, validation and significance testing (as theory; we do not perform it in the GRUMP analysis), and the main algorithm families (modularity maximisation, flow-based and spectral methods, consensus clustering). The presentation includes the necessary formulas and prepares the choice of methods and validation used later on the GRUMP networks.
+
+
+\subsection{Graphs, null models, and the definition of community}
+
+
+We consider undirected graphs (networks) as the main object of study. A graph $G = (V, E)$ consists of a set of nodes $V$ (e.g.\ taxa or ASVs) and a set of edges $E$ between them. Here $n = |V|$ is the number of nodes and $m = |E|$ the number of edges. The graph can be represented by an $n \times n$ adjacency matrix $\mathbf{A}$, with $A_{ij} = 1$ if there is an edge between nodes $i$ and $j$ (and $A_{ij} = 0$ otherwise). For weighted graphs, $A_{ij}$ takes the edge weight. The degree of node $i$ is $k_i = \sum_j A_{ij}$. Many real-world networks, including microbial association networks, are sparse ($m \ll n^2$) and exhibit heterogeneous degree distributions and local clustering, so that the arrangement of edges is far from random \citep{Fortunato_2016}.
+
+
+A \emph{community} (or \emph{module}) is informally a subset of nodes that are more densely connected among themselves than to the rest of the network. There is no single, universally agreed mathematical definition. Different algorithms implicitly or explicitly optimise different notions \citep{Fortunato_2016}. Early, \emph{classic} definitions relied on edge counting \citep{Fortunato_2016}. For a candidate subgraph $C$, the \emph{internal degree} of a node $i \in C$ is the number of edges from $i$ to other nodes in $C$, and the \emph{external degree} is the number of edges from $i$ to the rest of the network. The ratio of internal to total degree is sometimes called \emph{embeddedness}. A natural idea is that a community should have more internal than external edges. \citet{Fortunato_2016} summarise two influential formalisations: a \emph{strong} community (or LS-set) is a subgraph in which \emph{every} node has internal degree greater than its external degree. A \emph{weak} community requires only that the \emph{total} internal degree of the subgraph exceeds its total external degree \citep{Fortunato_2016}. These definitions assume non-overlapping, well-separated modules and are \emph{extensive} (they scale with community size), so they can perform poorly in large, heterogeneous networks. Other formalisations use cut-based measures: for example, \emph{conductance} of a set $C$ is the ratio of edges leaving $C$ to the total volume of $C$. If conductance is sufficiently low for clusters of a given size, one has a well-separated community at that scale \citep{Fortunato_2016}.
+
+
+Real networks often exhibit overlapping communities, hierarchical structure, and fuzzy boundaries, so edge-counting definitions are insufficient and motivate a \emph{modern}, probabilistic view \citep{Fortunato_2016}. In that view, a community is a set of nodes among which the \emph{probability} of connection is higher than between groups (e.g.\ $p_{\text{in}} > p_{\text{out}}$). Communities are thus statistical regularities rather than purely geometric ones. This probabilistic view naturally leads to generative models such as the stochastic block model (see next subsection).
+
+
+Community detection is the task of partitioning the node set into (possibly overlapping) communities. Figure~\ref{fig:classic-view} illustrates the traditional view of communities as dense subgraphs.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.5\textwidth]{fig/fig-4.png}
+\caption{Traditional view of community structure: dense subgraphs with more internal than external edges (from Fortunato \& Hric, 2016).}
+\label{fig:classic-view}
+\end{figure}
+
+
+A \emph{null model} is a random graph model that preserves certain features of the observed graph while randomising the rest. Comparing an observed quantity (such as the density of links inside a putative community, or the value of a quality function like modularity) to its distribution under the null model allows one to ask whether the observed structure is statistically meaningful rather than a chance fluctuation. The \emph{configuration model} is a standard null model: it generates random graphs with a prescribed degree sequence (e.g.\ that of the observed graph), typically by randomising edge endpoints. Preserving the degree sequence matters because many structural properties (including modularity) are defined relative to this baseline. It avoids attributing structure to effects that arise purely from heterogeneous degrees \citep{Fortunato_2016}. Modularity-based methods, introduced by \citet{Newman_2004} and developed further by \citet{Newman_2006}, compare the observed pattern of edges within communities to the expectation under the configuration model. The modularity formula and algorithm details are given later in this Methods section (subsection on modularity maximisation and the Louvain algorithm).
+
+
+% Visualisations (to add): same small graph as network vs adjacency matrix, schematic of configuration model.
+
+
+\subsection{The Stochastic Block Model}
+
+
+The stochastic block model (SBM) gives a precise \emph{generative} definition of community structure: one specifies a probabilistic process that produces the graph, rather than optimising a quality function such as modularity \citep{Fortunato_2016, Holland_1983}. The model has roots in the social networks literature \citep{Holland_1983}. We follow the formulation in \citet{Fortunato_2016}. Nodes are assigned to one of $q$ blocks (groups). Let $g_i \in \{1, \ldots, q\}$ denote the block of node $i$. Edges are then drawn independently: the probability of an edge between nodes $i$ and $j$ depends only on their block labels, $P(A_{ij} = 1) = \omega_{g_i, g_j}$, where $\boldsymbol{\omega}$ is a $q \times q$ matrix of connection probabilities. Typically, diagonal entries $\omega_{rr}$ are larger than off-diagonal ones, so that nodes in the same block are more likely to be connected (planted community structure). The likelihood of an observed graph under the SBM is a function of the block assignment and $\boldsymbol{\omega}$. Inference amounts to estimating these parameters, e.g.\ by maximum likelihood or expectation--maximisation (EM), and the number of blocks $q$ can be chosen via model selection criteria such as the Bayesian information criterion (BIC) or minimum description length \citep{Fortunato_2016}. The SBM thus differs from quality-function methods (e.g.\ modularity maximisation): it defines communities as blocks in a generative model, provides a likelihood and a clear notion of fit, and allows comparison of different partition sizes. Figure~\ref{fig:sbm-matrix} shows an adjacency matrix from an SBM with blocks visible after reordering nodes by group.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.75\textwidth]{fig/fig-8.png}
+\caption{Adjacency matrix of a graph generated from a stochastic block model. Nodes are ordered by block membership so that blocks appear as dense blocks (from Fortunato \& Hric, 2016).}
+\label{fig:sbm-matrix}
+\end{figure}
+
+
+\subsection{Validation, detectability, and significance testing}
+
+
+Evaluating community detection is difficult when ground truth is unknown. We summarise how benchmarks, partition similarity measures, structure versus metadata, significance testing, and two fundamental limits---resolution and detectability---shape the interpretation of results. This motivates our use of multiple algorithms and consensus clustering in the GRUMP analysis.
+
+
+Benchmark networks with a \emph{planted} partition allow comparison of algorithm output to ground truth. The \emph{Girvan--Newman} (GN) benchmark uses graphs with equal degree and equal community size (Figure~\ref{fig:gn-benchmark}). It is simple but unrealistic, because real networks typically have heterogeneous degrees and community sizes \citep{Fortunato_2016}. The \emph{Lancichinetti--Fortunato--Radicchi} (LFR) benchmark \citep{Lancichinetti_2008} generates graphs with power-law degree and power-law community size distributions (Figure~\ref{fig:lfr-benchmark}), providing a more realistic test. Benchmarks evaluate \emph{algorithms}, not real data. They do not validate that a given network has community structure.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{fig/fig-9.png}
+\caption{Girvan--Newman benchmark: graphs with known community structure, equal degree and size (from Fortunato \& Hric, 2016).}
+\label{fig:gn-benchmark}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.4\textwidth]{fig/fig-10.png}
+\caption{LFR benchmark: heterogeneous degrees and community sizes (Lancichinetti et al., 2008; from Fortunato \& Hric, 2016).}
+\label{fig:lfr-benchmark}
+\end{figure}
+
+To compare two partitions (e.g.\ algorithm output vs.\ planted partition, or two algorithm runs), similarity measures are needed. Similarity measures fall into pair-counting, cluster-matching, and information-theoretic classes \citep{Fortunato_2016}. \emph{Normalized mutual information} (NMI) is widely used:
+\begin{equation}
+  \mathrm{NMI} \in [0,1]; \quad \mathrm{NMI}=1 \text{ when partitions are identical, } \mathrm{NMI}=0 \text{ when independent.}
+\end{equation}
+NMI is sensitive to the number of clusters, so that partitions with more clusters can receive higher NMI even when not closer to the true partition \citep{Fortunato_2016}. The \emph{variation of information} (VI) \citep{Meila_2007} is a distance between partitions:
+\begin{equation}
+  \mathrm{VI}(X,Y) = H(X|Y) + H(Y|X),
+\end{equation}
+where $H(X|Y)$ is the conditional entropy. VI is a proper metric (non-negative, symmetric, satisfies the triangle inequality) and is theoretically better behaved. Lower VI means greater agreement \citep{Fortunato_2016, Meila_2007}. We report both NMI and VI where we compare partitions (e.g.\ across algorithms or runs).
+
+
+For real networks, ground truth is usually unknown. \citet{Fortunato_2016} advise against ``validating'' communities by agreement with metadata (e.g.\ taxonomic labels): structural communities need not align with external covariates. Metadata should \emph{interpret} the partition, not serve as a criterion of success (Figure~\ref{fig:structure-vs-metadata}). In the Results we use taxonomy and environmental variables to interpret modules, not to validate them.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{fig/structure_vs_metadata.png}
+\caption{Structural communities (left) need not align with metadata such as taxonomic classification (right). Interpretation rather than validation is the goal.}
+\label{fig:structure-vs-metadata}
+\end{figure}
+
+Observed community structure (e.g.\ modularity $Q$ or the number of within-community edges) should be compared to a null model. The \emph{configuration model} (random graphs with the same degree sequence) is the standard null \citep{Fortunato_2016}. One computes the same quantity on many random graphs from this model. If the observed value is far in the tail of the null distribution, the structure is unlikely to be due to chance. Modularity alone is insufficient---comparison to the configuration model is required to assess significance \citep{Fortunato_2016}. We do not perform this step in the GRUMP analysis; it is left for future work (see Conclusion, Future Directions).
+
+
+Two limits are important for interpretation.
+
+\noindent (1) \emph{Resolution limit} \citep{Fortunato_2007}: modularity-based methods (e.g.\ Louvain) have a preferential scale and cannot detect communities smaller than roughly $\sqrt{2m}$. Even a small, dense clique may be merged with a neighbouring group if that increases global modularity. This is an \emph{algorithmic} bias of modularity maximisation. Since we use Louvain and modularity to compare Atlantic and Pacific networks, our results may miss smaller, biologically relevant clusters.
+
+\noindent (2) \emph{Detectability phase transition} \citep{Decelle_2011}: in sparse networks, if the ``signal'' (edges within communities) is too weak relative to ``noise'' (edges between communities), no algorithm can recover the partition better than random---the structure is information-theoretically undetectable. This is a \emph{fundamental} limit of the network, not of a particular algorithm. Marine microbial networks are often sparse. Referencing \citet{Decelle_2011} allows discussion of whether weak or absent modular structure reflects biology or a non-detectable regime. Awareness of both limits justifies comparing multiple algorithms and interpreting results cautiously \citep{Fortunato_2016, Fortunato_2007, Decelle_2011}.
+
+
+\subsection{Community detection algorithms and method selection}
+
+
+\subsubsection{Modularity maximisation and the Louvain algorithm}
+
+
+\emph{Modularity} was introduced by \citet{Newman_2004} as a quality function to evaluate partitions: it measures how much the density of edges inside communities exceeds the expectation under a null model, typically the configuration model (random graphs with the same degree sequence). For a partition into communities,
+\begin{equation}
+  Q = \frac{1}{2m} \sum_{ij} \left[ A_{ij} - \frac{k_i k_j}{2m} \right] \delta(c_i, c_j),
+\end{equation}
+\vspace{0.5\baselineskip}
+\noindent where $c_i$ is the community of node $i$ and $\delta(c_i, c_j) = 1$ if $c_i = c_j$ and 0 otherwise \citep{Fortunato_2016, Newman_2004}. Up to a multiplicative constant, $Q$ is the number of edges within groups minus the expected number in an equivalent network with edges placed at random \citep{Newman_2006}. Thus $Q$ is high when links are concentrated inside communities relative to the configuration-model baseline. Modularity takes values in $[-1, 1]$. For weighted networks it is often interpreted as 0 for random structure and 1 for strong community structure. Values above about 0.3--0.4 are often taken as evidence of modular structure, though the \emph{maximal} modularity attainable depends on the network and its size, so $Q$ should not be compared directly across different networks \citep{Fortunato_2007, Fortunato_2016}.
+
+
+Exact modularity optimisation is NP-hard, so approximation algorithms are necessary for large networks \citep{Blondel_2008}. The \emph{Louvain} algorithm \citep{Blondel_2008} is a fast, scalable heuristic with two phases:
+
+
+\begin{enumerate}
+  \item \emph{Local movement}: repeatedly move each node to the neighbouring community that yields the largest increase in $Q$, until no improvement is possible.
+  \item \emph{Aggregation}: replace each community by a single super-node, with edge weights between super-nodes given by the sum of weights between the corresponding communities, then repeat phase 1 on the aggregated network.
+\end{enumerate}
+
+
+The process is hierarchical and runs in time $O(n \log n)$ in practice, making it one of the most widely used methods. Before Louvain, the fastest competitive approximation for large networks was the agglomerative method of \citet{Clauset_2004}. Because the order of node updates and ties can lead to different partitions, Louvain is non-deterministic---this motivates repeated runs and consensus clustering (see below).
+
+
+Two important caveats affect interpretation.
+
+\noindent (1) \emph{Resolution limit} (see above): it is therefore a priori impossible to tell whether a module found by Louvain is a single community or a cluster of smaller modules that were merged. This introduces caveats when interpreting Louvain output (e.g.\ biologically distinct microbial groups may be merged).
+
+\noindent (2) \emph{Modularity trap}: the modularity landscape has many local optima, so different runs or initialisations may yield different partitions with similar $Q$, and there is no unique ``best'' partition from modularity alone \citep{Fortunato_2016}. Louvain can also produce relatively few, large ``super-communities'' even on networks with no strong underlying structure \citep{Blondel_2008}. Testing whether observed modularity is significant requires comparison to the distribution of $Q$ under the configuration model (Figure~\ref{fig:modularity-null}).
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.7\textwidth]{fig/fig-24.png}
+\caption{Modularity of observed network compared to distribution under a null model - grey edges indicate connections to nodes outside of the community (from Fortunato \& Hric, 2016).}
+\label{fig:modularity-null}
+\end{figure}
+
+
+\subsubsection{Flow-based methods: Infomap and the map equation}
+
+
+\emph{Flow-based} methods define communities through the dynamics of a process on the network rather than through static structural quantities (e.g.\ edge counts or degrees). Random walks are the most widely used: if communities have high internal edge density and are well-separated from each other, a random walker tends to remain inside each cluster for a long time before escaping \citep{Fortunato_2016}. Good communities are thus regions where flow is ``trapped'' relative to the rest of the graph.
+
+
+\emph{Infomap} \citep{Rosvall_2008} exploits this idea in an information-theoretic way. The goal is to describe the trajectory of a random walk on the network as efficiently as possible. A naive encoding assigns a unique code to every node. A \emph{two-level} encoding instead assigns codes to \emph{modules} and reuses shorter codes for nodes within each module. When the partition reflects real flow bottlenecks, the expected description length of the walk is shorter. The \emph{map equation} quantifies this expected length. Infomap finds the partition that minimises it \citep{Rosvall_2008, Fortunato_2016}. Figure~\ref{fig:rosvall} illustrates this idea: a two-level description (module names plus codes within modules) yields a shorter description of the random walk than a one-level encoding. The approach does not assume a fixed null model (unlike modularity) and can recover structure at multiple scales. It has been extended to hierarchical partitions and to directed and weighted networks \citep{Rosvall_2008}.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\textwidth]{fig/fig-1-rosvall.png}
+\caption{Detecting communities by compressing the description of information flows (Rosvall \& Bergstrom, 2008). (A) A random walk on the network. (B) A one-level encoding gives a unique code to every node (e.g.\ Huffman). (C) A two-level encoding assigns codes to modules and reuses shorter codes for nodes within each module, yielding on average a shorter description. (D) Reporting only module names gives an optimal coarse-graining.}
+\label{fig:rosvall}
+\end{figure}
+
+
+Infomap and its variants often return \emph{different} partitions than structure-based methods such as modularity optimisation, because they optimise flow compression rather than density relative to the configuration model \citep{Fortunato_2016}. The difference is particularly striking on directed graphs, where edge directions strongly constrain possible flows \citep{Rosvall_2008}. When comparing algorithms in the Results, we therefore expect flow-based (Infomap) and density-based (Louvain) partitions to differ. Both can be informative. Infomap shares resolution-type limitations (e.g.\ minimum detectable community scale) and depends on the flow model (unweighted vs weighted, undirected vs directed), so results should be interpreted in light of the chosen network representation \citep{Fortunato_2016}.
+
+
+\subsubsection{Spectral methods and the non-backtracking matrix}
+
+
+\emph{Spectral} methods use the eigenvalues and eigenvectors of a matrix associated with the graph to embed nodes and then cluster them. For the adjacency matrix or the Laplacian, a well-known problem in \emph{sparse} networks is that many eigenvalues lie in a \emph{bulk}, and the few eigenvalues that carry information about community structure can merge with this bulk, so that standard spectral clustering fails \citep{Fortunato_2016}. Real-world networks (including microbial association networks) are often sparse, so this limitation is relevant in practice.
+
+
+\citet{Krzakala_2013} introduced spectral algorithms based on the \emph{non-backtracking} matrix $B$: it encodes steps along directed edges that never go back immediately (from $(u,v)$ to $(v,w)$ only when $w \neq u$). Formally,
+\begin{equation}
+  B_{(u \to v),(v \to w)} = 1 \quad \text{if } w \neq u, \quad \text{and } 0 \text{ otherwise.}
+\end{equation}
+The spectrum of $B$ is much better behaved than that of the adjacency matrix or other commonly used matrices: it maintains a strong separation between the \emph{bulk} eigenvalues and the eigenvalues relevant to community structure even in the sparse case \citep{Krzakala_2013}. For graphs generated by the stochastic block model, the resulting algorithm is optimal in the sense that it detects communities all the way down to the theoretical detectability limit \citep{Krzakala_2013}. The number of real eigenvalues of $B$ lying outside the bulk can be used to \emph{infer} the number of communities $q$. The corresponding eigenvectors then support clustering of nodes into communities without requiring $q$ to be fixed in advance \citep{Fortunato_2016, Krzakala_2013}. For further theoretical treatment of the non-backtracking spectrum, see \citet{Glover_2020}.
+
+
+\subsubsection{Other popular algorithms}
+
+
+Several other algorithms are commonly used and implemented in standard tools. \emph{Fast Greedy} \citep{Clauset_2004} is an agglomerative method that maximises modularity by repeatedly merging the pair of communities that yields the largest increase in $Q$. It uses efficient (e.g.\ heap-based) data structures and runs in $O(n \log^2 n)$ time on sparse graphs, producing a dendrogram. It establishes greedy modularity optimisation as a scalable alternative to exact optimisation and is often faster than Louvain but generally less accurate in practice \citep{Clauset_2004, Fortunato_2016}. \emph{Leading Eigenvector} \citep{Newman_2006} reformulates modularity in terms of the \emph{modularity matrix} and uses the leading eigenvector to bipartition the graph. The process can be applied recursively to obtain a hierarchical partition. This bridges modularity maximisation with spectral partitioning and is fast for large networks \citep{Newman_2006}. \emph{Walktrap} \citep{Pons_2005} exploits the idea that short random walks tend to stay within communities: it defines a distance between nodes from the difference in the probability of being at each node after a fixed number of steps, then performs hierarchical clustering on this distance to obtain a dendrogram. Walktrap thus bridges structural (modularity-like) and flow-based (random-walk) intuition and is often competitive with other methods \citep{Pons_2005, Fortunato_2016}. All of these can be combined with consensus clustering (below) for robustness.
+
+
+\subsubsection{Consensus clustering}
+
+
+Many algorithms, especially Louvain and other stochastic heuristics, can return different partitions across runs because the modularity (or other objective) landscape has many local optima and the order of node updates or tie-breaking is not fixed \citep{Fortunato_2016}. Single runs are therefore unstable: multiple near-optimal solutions exist, and there is no guarantee that one run captures the most meaningful or reproducible structure. \emph{Consensus clustering} is recommended to increase robustness \citep{Fortunato_2016}. A simple approach is to run the algorithm many times and either build a co-association matrix and re-cluster it, or choose a representative partition (e.g.\ the run with highest modularity). A more rigorous, iterative procedure is given by \citet{Lancichinetti_2012}:
+
+
+\begin{enumerate}
+  \item Apply the algorithm $A$ on the original graph $G$ $n_P$ times, yielding $n_P$ partitions.
+  \item Compute the \emph{consensus matrix} $D$, where $D_{ij}$ is the number of partitions in which vertices $i$ and $j$ are assigned to the same community, divided by $n_P$.
+  \item Set all entries of $D$ below a chosen threshold $\tau$ to zero.
+  \item Apply $A$ on the graph with adjacency $D$ (i.e.\ the weighted graph whose edge weights are the entries of $D$) $n_P$ times, yielding $n_P$ new partitions.
+  \item If the $n_P$ partitions are all equal, stop and take that partition as the consensus. Otherwise go back to step 2.
+\end{enumerate}
+
+
+This iteration emphasises structure that is stable across runs: pairs of nodes that are rarely grouped together get weak or zero weight in $D$, so the consensus graph sharpens the community signal (Figure~\ref{fig:consensus}). For the GRUMP analysis we use this iterative procedure with Louvain as $A$, $n_P = 30$, and $\tau = 0.5$, and report the consensus partition (and the number of iterations until convergence) for downstream interpretation.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.7\textwidth]{fig/fig-22.png}
+\caption{Consensus clustering: run algorithm repeatedly, build co-association matrix, then re-cluster to obtain stable partition (from Fortunato \& Hric, 2016).}
+\label{fig:consensus}
+\end{figure}
+
+
+\FloatBarrier
+\newpage
+\subsection{Method selection}
+
+
+Table~\ref{tab:methods} summarizes the methods discussed above: for each algorithm we give a short description, its main strengths, and its limitations. No single method is best for all networks. The choice depends on the type of graph (e.g.\ weighted, directed), the scale of structure of interest, and whether the number of communities is known or must be inferred \citep{Fortunato_2016}.
+
+
+\begin{table}[htbp]
+\centering
+\caption{Community detection methods: brief overview of strengths and limitations.}
+\label{tab:methods}
+\small
+\begin{tabular}{p{2.2cm}p{3.8cm}p{3.5cm}p{3.8cm}}
+\toprule
+\textbf{Method} & \textbf{Description} & \textbf{Strengths} & \textbf{Limitations} \\
+\midrule
+Louvain & Greedy modularity maximisation. Aggregate nodes, then repeat. & Fast and scalable. Very widely used. & Resolution limit. Modularity trap (many local optima). \\
+Infomap & Minimise description length of random walk (map equation). & No fixed null model. Multi-scale. & Resolution-type issues. Depends on flow model. \\
+Spectral / non-backtracking & Use spectrum of (e.g.) non-backtracking matrix. & Can infer no.\ of communities $q$. Principled. & Sensitive to model assumptions. Bulk vs outliers. \\
+Fast Greedy & Agglomerative modularity. Merge by $\Delta Q$. & Fast. Yields dendrogram. & Resolution limit. Greedy. \\
+Leading Eigenvector & Leading eigenvector of modularity matrix. Recursive split. & Spectral. Hierarchical. & Bisection bias. Recursive only. \\
+Walktrap & Distance from random-walk probabilities. Then cluster. & Intuitive (walks stay in modules). & Fixed walk length. Resolution. \\
+Consensus clustering & Run algorithm repeatedly. Co-association or representative partition. & Stability. Reduces run-to-run noise. & Computationally heavier. Needs many runs. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\citet{Fortunato_2016} stress that there is no one-size-fits-all choice: the best method depends on the type of network, the scale of structure one is interested in, and whether the number of communities is known or must be inferred. They recommend two practices. First, \emph{significance testing}: detected communities should deviate significantly from what would be expected under a null model (e.g.\ the configuration model). If the observed structure is compatible with random fluctuations, it should not be interpreted as meaningful \citep{Fortunato_2016}. Second, \emph{comparative use of several algorithms}: because different methods optimise different objectives (e.g.\ modularity vs.\ flow compression), they can yield different partitions. Trying several and, where possible, using consensus clustering improves stability and guards against over-interpreting the output of any single run \citep{Fortunato_2016}.

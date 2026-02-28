@@ -1,0 +1,328 @@
+---
+title: "Network Analysis: Atlantic and Pacific Microbial Communities"
+author: "Maximilian Frei"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 10, fig.height = 6)
+```
+
+# Load Libraries
+
+```{r libraries}
+library(igraph)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+```
+
+# Load Network Data
+
+```{r load-networks}
+# Load edgelists
+atlantic_edges <- read.csv("data/export/estimated_network/atlantic_edgelist.csv")
+pacific_edges <- read.csv("data/export/estimated_network/pacific_edgelist.csv")
+
+# Check column names
+cat("Column names:", colnames(atlantic_edges), "\n\n")
+
+# Create igraph objects (using correct column names: v1, v2, adja)
+g_atlantic <- graph_from_data_frame(atlantic_edges[, c("v1", "v2", "adja")], 
+                                     directed = FALSE)
+g_pacific <- graph_from_data_frame(pacific_edges[, c("v1", "v2", "adja")], 
+                                    directed = FALSE)
+
+cat("Atlantic network loaded:", vcount(g_atlantic), "nodes,", ecount(g_atlantic), "edges\n")
+cat("Pacific network loaded:", vcount(g_pacific), "nodes,", ecount(g_pacific), "edges\n")
+```
+
+# Data Inspection: What is in this network?
+
+Before computing statistics, we clarify what the objects represent. This sets the stage for interpreting degree, edge weights, and connectivity—and later for community detection.
+
+```{r data-inspection}
+cat("=== NETWORK STRUCTURE ===\n\n")
+
+cat("Atlantic Network:\n")
+cat("  • Nodes:", vcount(g_atlantic), "microbial ASVs (bacteria, archaea, eukaryotes)\n")
+cat("  • Edges:", ecount(g_atlantic), "significant co-occurrence associations (SPIEC-EASI)\n")
+cat("  • Average degree:", round(mean(degree(g_atlantic)), 2), "connections per ASV\n\n")
+
+cat("Pacific Network:\n")
+cat("  • Nodes:", vcount(g_pacific), "microbial ASVs (bacteria, archaea, eukaryotes)\n")
+cat("  • Edges:", ecount(g_pacific), "significant co-occurrence associations (SPIEC-EASI)\n")
+cat("  • Average degree:", round(mean(degree(g_pacific)), 2), "connections per ASV\n\n")
+
+cat("Edge weights (adja) = strength of co-occurrence; all edges are positive in this dataset.\n\n")
+
+cat("=== EXAMPLE EDGES (Atlantic) ===\n")
+print(head(atlantic_edges[, c("v1", "v2", "adja")], 10))
+```
+
+# Basic Network Statistics
+
+```{r network-stats}
+# Calculate basic statistics
+network_stats <- data.frame(
+  Network = c("Atlantic", "Pacific"),
+  Nodes = c(vcount(g_atlantic), vcount(g_pacific)),
+  Edges = c(ecount(g_atlantic), ecount(g_pacific)),
+  Density = c(edge_density(g_atlantic), edge_density(g_pacific)),
+  Avg_Degree = c(mean(degree(g_atlantic)), mean(degree(g_pacific))),
+  Max_Degree = c(max(degree(g_atlantic)), max(degree(g_pacific)))
+)
+
+# Display as nice table
+kable(network_stats, 
+      digits = 4,
+      caption = "Basic Network Statistics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+# Degree Distributions
+
+```{r degree-distributions, fig.height=6, fig.width=12}
+par(mfrow = c(1, 2))
+
+# Atlantic
+hist(degree(g_atlantic), 
+     breaks = 50,
+     main = "Atlantic Degree Distribution",
+     xlab = "Degree", 
+     col = "skyblue",
+     border = "white")
+
+# Pacific
+hist(degree(g_pacific),
+     breaks = 50,
+     main = "Pacific Degree Distribution",
+     xlab = "Degree",
+     col = "coral",
+     border = "white")
+```
+
+# Connectivity Analysis
+
+## Edge Weight Distribution
+
+```{r edge-weights}
+# Extract edge weights
+edge_weights_atl <- E(g_atlantic)$adja
+edge_weights_pac <- E(g_pacific)$adja
+
+# Summary statistics
+edge_stats <- data.frame(
+  Network = c("Atlantic", "Pacific"),
+  Total_Edges = c(ecount(g_atlantic), ecount(g_pacific)),
+  Positive_Edges = c(sum(edge_weights_atl > 0), sum(edge_weights_pac > 0)),
+  Negative_Edges = c(sum(edge_weights_atl < 0), sum(edge_weights_pac < 0)),
+  Pct_Positive = c(
+    round(100 * sum(edge_weights_atl > 0) / ecount(g_atlantic), 1),
+    round(100 * sum(edge_weights_pac > 0) / ecount(g_pacific), 1)
+  ),
+  Mean_Weight = c(mean(edge_weights_atl), mean(edge_weights_pac)),
+  Median_Weight = c(median(edge_weights_atl), median(edge_weights_pac))
+)
+
+kable(edge_stats,
+      digits = 3,
+      caption = "Edge Weight Distribution") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+```{r edge-weight-plots, fig.height=6, fig.width=12}
+par(mfrow = c(1, 2))
+
+# Atlantic - edge weight histogram
+hist(edge_weights_atl, breaks = 50,
+     main = "Atlantic: Edge Weights",
+     xlab = "Weight", col = "skyblue", border = "white")
+
+# Pacific - edge weight histogram
+hist(edge_weights_pac, breaks = 50,
+     main = "Pacific: Edge Weights",
+     xlab = "Weight", col = "coral", border = "white")
+```
+
+## Network Connectivity Metrics
+
+```{r connectivity-metrics}
+# Path length and diameter: use weights = NA so we report number of steps (hops), not sum of edge weights
+connectivity_metrics <- data.frame(
+  Metric = c(
+    "Clustering Coefficient",
+    "Average Path Length",
+    "Diameter",
+    "Assortativity (degree)",
+    "Connected Components",
+    "Largest Component Size",
+    "Pct in Largest Component"
+  ),
+  Atlantic = c(
+    round(transitivity(g_atlantic, type = "global"), 4),
+    round(mean_distance(g_atlantic, directed = FALSE, weights = NA), 2),
+    diameter(g_atlantic, directed = FALSE, weights = NA),
+    round(assortativity_degree(g_atlantic), 4),
+    components(g_atlantic)$no,
+    max(components(g_atlantic)$csize),
+    round(100 * max(components(g_atlantic)$csize) / vcount(g_atlantic), 1)
+  ),
+  Pacific = c(
+    round(transitivity(g_pacific, type = "global"), 4),
+    round(mean_distance(g_pacific, directed = FALSE, weights = NA), 2),
+    diameter(g_pacific, directed = FALSE, weights = NA),
+    round(assortativity_degree(g_pacific), 4),
+    components(g_pacific)$no,
+    max(components(g_pacific)$csize),
+    round(100 * max(components(g_pacific)$csize) / vcount(g_pacific), 1)
+  )
+)
+
+kable(connectivity_metrics,
+      caption = "Network Connectivity Metrics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+**Interpretation:**
+
+- **Clustering Coefficient:** How tightly clustered are neighborhoods? (0-1, higher = more triangles)
+- **Average Path Length:** Mean number of steps (hops) between connected nodes; computed with `weights = NA` (unweighted).
+- **Diameter:** Longest shortest path in the network (number of steps); computed with `weights = NA` (unweighted).
+- **Assortativity:** Do high-degree nodes connect to other high-degree nodes? (positive = yes)
+- **Connected Components:** Number of disconnected pieces
+- **Largest Component:** Size of the main connected network
+
+## Adjacency Matrix Visualization
+
+### Top 100 Most Connected Nodes
+
+```{r adjacency-matrix-top100, fig.height=12, fig.width=14}
+# Function to create adjacency matrix heatmap
+plot_adjacency_snapshot <- function(g, title, n_nodes = 100) {
+  # Get top connected nodes
+  degrees <- degree(g)
+  top_nodes <- names(sort(degrees, decreasing = TRUE)[1:n_nodes])
+  
+  # Create subgraph
+  g_sub <- induced_subgraph(g, top_nodes)
+  
+  # Get adjacency matrix
+  adj_mat <- as_adjacency_matrix(g_sub, attr = "adja", sparse = FALSE)
+  
+  # Order by degree for better visualization
+  node_order <- order(degree(g_sub), decreasing = TRUE)
+  adj_mat_ordered <- adj_mat[node_order, node_order]
+  
+  # Reverse row order so row 1 appears at top when plotted
+  adj_mat_display <- adj_mat_ordered[nrow(adj_mat_ordered):1, ]
+  
+  # Create heatmap
+  par(mar = c(5, 5, 4, 2))
+  image(1:n_nodes, 1:n_nodes, t(adj_mat_display),
+        col = colorRampPalette(c("blue", "white", "red"))(100),
+        xlab = "Node Index (sorted by degree)",
+        ylab = "Node Index (sorted by degree)",
+        main = paste(title, "\nTop", n_nodes, "nodes by degree\n(1,1) = top-left = most connected"),
+        axes = FALSE)
+  
+  # Add axis labels (y-axis reversed to match display)
+  axis(1, at = seq(1, n_nodes, by = 10), labels = seq(1, n_nodes, by = 10), 
+       cex.axis = 0.8)
+  axis(2, at = seq(1, n_nodes, by = 10), labels = seq(n_nodes, 1, by = -10), 
+       cex.axis = 0.8, las = 1)
+  
+  # Add grid
+  abline(h = seq(1, n_nodes, by = 10), col = "gray80", lty = 3, lwd = 0.5)
+  abline(v = seq(1, n_nodes, by = 10), col = "gray80", lty = 3, lwd = 0.5)
+  
+  # Add corner labels (adjusted for correct positioning)
+  text(5, 95, "(1,1)", col = "black", cex = 1.2, font = 2)
+  text(95, 5, paste0("(", n_nodes, ",", n_nodes, ")"), 
+       col = "black", cex = 1.2, font = 2)
+  
+  # Add color scale legend
+  legend("bottomright", 
+         legend = c("Strong + (co-occur)", "No connection", "Strong - (exclude)"),
+         fill = c("red", "white", "blue"),
+         title = "Edge Weight",
+         bg = "white",
+         cex = 0.9)
+  
+  # Print stats
+  cat("\n", title, "- Adjacency Matrix Stats:\n")
+  cat("  Dimensions:", n_nodes, "x", n_nodes, "\n")
+  cat("  Non-zero entries:", sum(adj_mat_ordered != 0), "/", n_nodes^2, 
+      "(", round(100 * sum(adj_mat_ordered != 0) / n_nodes^2, 2), "%)\n")
+  cat("  Weight range: [", round(min(adj_mat_ordered), 3), ",", 
+      round(max(adj_mat_ordered), 3), "]\n\n")
+}
+
+# Atlantic
+plot_adjacency_snapshot(g_atlantic, "Atlantic Network", n_nodes = 100)
+
+# Pacific  
+plot_adjacency_snapshot(g_pacific, "Pacific Network", n_nodes = 100)
+```
+
+
+### Full Adjacency Matrix Export (Optional)
+
+```{r export-adjacency, eval=FALSE}
+# Export full adjacency matrices to CSV if needed
+# Warning: These will be LARGE files (nodes x nodes)
+
+adj_atl_full <- as_adjacency_matrix(g_atlantic, attr = "adja", sparse = FALSE)
+adj_pac_full <- as_adjacency_matrix(g_pacific, attr = "adja", sparse = FALSE)
+
+write.csv(adj_atl_full, "results/atlantic_adjacency_matrix.csv")
+write.csv(adj_pac_full, "results/pacific_adjacency_matrix.csv")
+
+cat("Full adjacency matrices exported to results/\n")
+cat("Atlantic:", nrow(adj_atl_full), "x", ncol(adj_atl_full), "\n")
+cat("Pacific:", nrow(adj_pac_full), "x", ncol(adj_pac_full), "\n")
+```
+
+# Export summary (for context)
+
+Write key results to a summary file so the analysis output is available in one place (e.g. for follow-up questions or reporting).
+
+```{r export-summary, echo=FALSE}
+dir.create("results", showWarnings = FALSE)
+sink("results/network_analysis_summary.md")
+cat("# Network analysis summary\n")
+cat("Generated:", format(Sys.time(), "%Y-%m-%d %H:%M"), "\n\n")
+cat("## Basic network statistics\n\n")
+cat("| Network | Nodes | Edges | Density | Avg degree | Max degree |\n")
+cat("|---------|-------|-------|---------|------------|------------|\n")
+cat(sprintf("| Atlantic | %d | %d | %.4f | %.2f | %d |\n",
+    network_stats$Nodes[1], network_stats$Edges[1], network_stats$Density[1],
+    network_stats$Avg_Degree[1], network_stats$Max_Degree[1]))
+cat(sprintf("| Pacific  | %d | %d | %.4f | %.2f | %d |\n\n",
+    network_stats$Nodes[2], network_stats$Edges[2], network_stats$Density[2],
+    network_stats$Avg_Degree[2], network_stats$Max_Degree[2]))
+cat("## Edge weights\n\n")
+cat("| Network | Mean weight | Median weight |\n")
+cat("|---------|-------------|-------------|\n")
+cat(sprintf("| Atlantic | %.4f | %.4f |\n", edge_stats$Mean_Weight[1], edge_stats$Median_Weight[1]))
+cat(sprintf("| Pacific  | %.4f | %.4f |\n\n", edge_stats$Mean_Weight[2], edge_stats$Median_Weight[2]))
+cat("## Connectivity metrics\n\n")
+cat("| Metric | Atlantic | Pacific |\n")
+cat("|--------|----------|--------|\n")
+for (i in seq_len(nrow(connectivity_metrics))) {
+  cat(sprintf("| %s | %s | %s |\n",
+      connectivity_metrics$Metric[i], connectivity_metrics$Atlantic[i], connectivity_metrics$Pacific[i]))
+}
+sink()
+cat("Summary written to results/network_analysis_summary.md\n")
+```
+
+---
+
+**Next steps:** Community detection (Louvain, Infomap, etc.) and consensus clustering in `community_detection.Rmd`; environmental and taxonomic interpretation of modules; basin comparison.

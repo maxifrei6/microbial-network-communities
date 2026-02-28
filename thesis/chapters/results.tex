@@ -1,0 +1,145 @@
+This section presents the application of the methods described above to the GRUMP data. We first describe the data source and network construction and report basic statistics for the Atlantic and Pacific association networks. We then report community structure and modularity under several detection algorithms, compare partitions across methods, and use iterative consensus clustering to obtain a stable partition for interpretation. Finally we interpret the consensus modules using taxonomy and node-level environmental summaries and compare how structural clusters align with environmental or taxonomic gradients in each basin.
+
+
+\subsection{Network structure and descriptive statistics}
+
+
+\subsubsection{Data source and network description}
+
+
+The data come from the Global Repeating Upper-ocean Microbial Patterns (GRUMP) database \citep{McNichol_2025}, comprising roughly 1000 samples from ocean cruises between 2003 and 2020. Counts are available for bacteria, archaea, and eukaryotes as amplicon sequencing variants (ASVs), with taxonomic annotation from Silva \citep{Quast_2013} (bacteria/archaea) and PR2 \citep{Guillou_2013} (eukaryotes). Raw data were converted to sample-by-ASV count tables, 16S chloroplast sequences were removed to avoid double-counting, and a single \texttt{phyloseq} \citep{McMurdie_2013} object (OTU table, taxonomy, and sample metadata) was built. For network inference, samples were restricted to the upper 200\,m and split by ocean basin (Atlantic and Pacific). Within each basin, a Milici-style prevalence and abundance filter was applied: ASVs had to contribute more than 0.001\% of total reads in that basin and satisfy at least one of three criteria---(i) present at relative abundance $>1$\% in at least one sample, (ii) present at $>0.1$\% in at least 2\% of samples, or (iii) present in at least 5\% of samples at any non-zero abundance. Filtering was applied separately in each basin, and zero-abundance taxa per basin were pruned. So that both basin-level networks are comparable, the same set of taxa was used for the analysis---the intersection of taxa retained in the Atlantic and Pacific basins. Association networks were then estimated separately for each basin using SPIEC-EASI \citep{Kurtz_2015} via the NetCoMi package \citep{Peschel_2021}, with the Meinshausen--Bühlmann graphical lasso and stability selection (StARS: 5 replicates, 20 lambda values, threshold 0.01). The resulting adjacency matrices can in principle be signed. In the analysed export all edge weights are positive (co-occurrence strength), as negative associations were not retained in the exported networks. Edgelists and node-level metadata (e.g.\ taxonomy, environmental summaries) were exported for each basin. The analyses reported here use these provided edgelists and node features.
+
+
+\subsubsection{Basic statistics: Atlantic and Pacific}
+
+
+Both basin-level networks share the same node set (the intersection of taxa retained in each basin), so that basin comparison is not confounded by different taxon lists. Each network has $n = 3175$ nodes (ASVs) and approximately 25\,000 edges (Atlantic: 25\,173, Pacific: 25\,383). Density is low (0.005 in both basins), as expected for sparse microbial association networks. Table~\ref{tab:network-stats} summarises basic statistics and Table~\ref{tab:connectivity} gives connectivity metrics (clustering coefficient, average path length and diameter in number of steps, assortativity, and connected components). Average path length and diameter were computed with edge weights ignored (unweighted, i.e.\ number of hops) so that values are comparable across basins and interpretable as steps. The Atlantic network has two connected components (99.6\% of nodes in the largest). The Pacific network is connected. Clustering is higher in the Atlantic (0.097) than in the Pacific (0.062). Both networks show slight negative degree assortativity. Mean edge weight is similar in both basins ($\approx 0.31$).
+
+
+\begin{table}[htbp]
+\centering
+\caption{Basic network statistics: Atlantic and Pacific GRUMP association networks ($n = 3175$ nodes each).}
+\label{tab:network-stats}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Metric} & \textbf{Atlantic} & \textbf{Pacific} \\
+\midrule
+Nodes & 3175 & 3175 \\
+Edges & 25\,173 & 25\,383 \\
+Density & 0.0050 & 0.0050 \\
+Avg.\ degree & 15.86 & 15.99 \\
+Max.\ degree & 220 & 460 \\
+Mean edge weight & 0.3126 & 0.3116 \\
+Median edge weight & 0.3026 & 0.3026 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[htbp]
+\centering
+\caption{Connectivity metrics: Atlantic and Pacific. Path length and diameter are in number of steps (unweighted).}
+\label{tab:connectivity}
+\begin{tabular}{lp{3.2cm}p{2.8cm}}
+\toprule
+\textbf{Metric} & \textbf{Atlantic} & \textbf{Pacific} \\
+\midrule
+Clustering coefficient & 0.0972 & 0.0624 \\
+Average path length & 3.88 & 3.74 \\
+Diameter & 16 & 11 \\
+Assortativity (degree) & $-$0.1002 & $-$0.0943 \\
+Connected components & 2 & 1 \\
+Largest component size & 3162 & 3175 \\
+\% in largest component & 99.6 & 100 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Community structure and modularity}
+
+
+\subsubsection{Detection results and modularity by algorithm}
+
+
+We apply five algorithms to the GRUMP Atlantic and Pacific networks: Louvain \citep{Blondel_2008}, Infomap (map equation), Fast Greedy, Leading Eigenvector, and Walktrap (all via \texttt{igraph}), and we use consensus clustering over multiple Louvain runs to obtain a stable partition for downstream analysis. We compare partitions across algorithms using normalized mutual information (NMI) and variation of information (VI), and we use taxonomy and environmental variables to \emph{interpret} the detected modules rather than to validate them. Table~\ref{tab:algorithm-comparison} gives the number of communities and modularity $Q$ per algorithm and basin. Figure~\ref{fig:algorithm-bars} shows the same quantities as grouped bar charts for both basins.
+
+
+The number of communities varies strongly across methods: from 5--6 (Fast Greedy, Leading Eigenvector in the Pacific) to 49--57 (Walktrap, Infomap). Modularity-based methods (Louvain, Fast Greedy, Leading Eigenvector, Walktrap) typically return fewer, larger modules and higher $Q$. Infomap, which optimises the map equation rather than modularity, yields more, smaller communities. For every algorithm, the Atlantic network attains higher modularity than the Pacific (Figure~\ref{fig:algorithm-bars}), suggesting a somewhat clearer modular structure in the Atlantic. This comparison is descriptive rather than inferential, as modularity was not tested against a null model and should not be interpreted as a formal significance result. Because there is no ground truth, we do not choose a single ``best'' algorithm. The partition similarity measures below quantify agreement across methods, and we then use consensus clustering to obtain a robust partition.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\textwidth]{fig/algorithm_comparison_bars.pdf}
+\caption{Community detection by algorithm and basin. Left: modularity $Q$. Right: number of communities $K$. Atlantic (blue) attains higher modularity than Pacific (red) for every algorithm. Infomap and Walktrap return many more communities than the modularity-based methods.}
+\label{fig:algorithm-bars}
+\end{figure}
+
+
+\begin{table}[htbp]
+\centering
+\caption{Community detection: number of communities and modularity $Q$ by algorithm and basin (single run per algorithm).}
+\label{tab:algorithm-comparison}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Algorithm} & \textbf{$K$ (Atl.)} & \textbf{$K$ (Pac.)} & \textbf{$Q$ (Atl.)} & \textbf{$Q$ (Pac.)} \\
+\midrule
+Louvain & 12 & 9 & 0.622 & 0.598 \\
+Infomap & 55 & 57 & 0.561 & 0.555 \\
+Fast Greedy & 11 & 5 & 0.597 & 0.569 \\
+Leading Eigenvector & 8 & 6 & 0.580 & 0.575 \\
+Walktrap & 35 & 49 & 0.591 & 0.546 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsubsection{Algorithm comparison and stability}
+
+
+We quantify agreement between the five algorithm partitions using NMI (1 = identical, 0 = independent) and VI (0 = identical, larger = more different) \citep{Meila_2007}. Figure~\ref{fig:nmi-heatmap} shows the pairwise NMI matrix for Atlantic and Pacific. Pairwise NMI values lie in a moderate range (approximately 0.51--0.67): no two partitions are identical, but all share some structure. Modularity-based methods (Louvain, Fast Greedy, Walktrap) agree more with each other (higher NMI, lower VI), as seen in the block structure of the NMI matrices. Infomap and Leading Eigenvector disagree more with the others, consistent with their different objectives. The pattern is similar in both basins. We use the iterative consensus procedure described in the Methods \citep{Lancichinetti_2012}: build the consensus matrix $D$ from $n_P = 30$ Louvain runs, set entries below $\tau = 0.5$ to zero, re-apply Louvain on the graph with adjacency $D$, and repeat until all $n_P$ partitions agree. The resulting consensus partition is used in the following section for taxonomic and environmental interpretation \citep{Blondel_2008}.
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.9\textwidth]{fig/nmi_heatmap.pdf}
+\caption{Normalized mutual information (NMI) between algorithm partitions, by basin. Colour indicates NMI (1 = identical partitions, 0 = independent). Diagonal entries are 1. Off-diagonals show moderate agreement (roughly 0.51--0.67), with stronger agreement among modularity-based methods (Louvain, Fast Greedy, Walktrap) and weaker agreement involving Infomap and Leading Eigenvector.}
+\label{fig:nmi-heatmap}
+\end{figure}
+
+
+\subsection{Ecological interpretation and basin comparison}
+
+
+We interpret the consensus communities using taxonomy (Phylum, Class) and node-level environmental summaries (mean temperature, salinity, depth across samples where each ASV was observed). This is \emph{interpretation}, not validation: structural modules need not align with taxonomic or environmental groupings \citep{Fortunato_2016}.
+
+
+\subsubsection{Environmental and taxonomic associations}
+
+
+We do not compute NMI between the structural partition and a taxonomic grouping. The goal is to attach ecological meaning to the modules, not to judge success by alignment.
+
+
+To visualise the co-occurrence network and how node attributes align with structure, we plot the same network layout once per basin, with nodes coloured in turn by (a) consensus module, (b) temperature, (c) absolute latitude, (d) depth, (e) salinity, and (f) Class (Figure~\ref{fig:network-atlantic}, Figure~\ref{fig:network-pacific}). Node size reflects degree. The shared layout allows direct comparison: if modules match environmental or taxonomic gradients, the corresponding panels will show coherent colouring within spatial clusters. Otherwise the structural partition is largely independent of those covariates. Larger, single-panel versions of each colouring are provided in the Appendix (Sections~\ref{sec:app-atlantic-panels} and \ref{sec:app-pacific-panels}).
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{fig/network_atlantic_panels.pdf}
+\caption{Atlantic co-occurrence network: same layout, six panels (3$\times$2). (a) Consensus modules. (b)--(e) Environmental variables (temperature, absolute latitude, depth, salinity). (f) Taxonomy (Class). Node size $\propto$ degree.}
+\label{fig:network-atlantic}
+\end{figure}
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{fig/network_pacific_panels.pdf}
+\caption{Pacific co-occurrence network: same layout, six panels (3$\times$2). Panels as in Figure~\ref{fig:network-atlantic}.}
+\label{fig:network-pacific}
+\end{figure}
+
+
+\subsubsection{Basin-specific patterns}
+
+
+The iterative consensus procedure converged in two iterations in both basins. The Atlantic network yields 11 consensus communities with modularity $Q = 0.613$ on the original graph. The Pacific yields 10 communities with $Q = 0.593$. Atlantic thus has slightly higher modularity and one more module than Pacific, consistent with the single-run algorithm comparison (Atlantic attained higher $Q$ for every method). Mean community size is 289 (Atlantic) and 318 (Pacific), with median 176 (Atlantic) and 378 (Pacific). Pacific modules are therefore larger on average and more even in size (higher median), whereas the Atlantic has one more community and a lower median size, suggesting the presence of smaller modules. The network figures (Figures~\ref{fig:network-atlantic} and \ref{fig:network-pacific}) allow a qualitative comparison of how module structure and environmental or taxonomic gradients align in each ocean.

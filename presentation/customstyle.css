@@ -1,0 +1,129 @@
+/*-- scss:defaults --*/
+
+/*-- scss:rules --*/
+
+body {
+    text-align: justify;
+  }
+  
+  .reveal .table {
+      width: 100%;
+      table-layout: fixed;
+  }
+  .reveal th,.reveal td {
+      white-space: nowrap;
+      text-align: center;
+  }
+  
+  /* Compact table styling (used via ::: {.compact-table} wrapper in .qmd) */
+  .reveal .compact-table table {
+      width: 92%;
+      margin-left: -20px; /* small nudge left to avoid right-edge clipping */
+      margin-right: auto;
+      font-size: 0.62em;
+      border-collapse: collapse;
+      table-layout: fixed;
+  }
+
+  .reveal .compact-table table th,
+  .reveal .compact-table table td {
+      padding: 6px 8px;
+      border: 1px solid #bdbdbd;
+      white-space: normal !important; /* override global nowrap */
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.15;
+  }
+
+  .reveal .compact-table table th {
+      background-color: #f0f0f0;
+      font-weight: 700;
+  }
+
+  /* Column widths to prevent the 3rd column from pushing off-screen */
+  .reveal .compact-table table th:nth-child(1),
+  .reveal .compact-table table td:nth-child(1) { width: 22%; }
+  .reveal .compact-table table th:nth-child(2),
+  .reveal .compact-table table td:nth-child(2) { width: 38%; }
+  .reveal .compact-table table th:nth-child(3),
+  .reveal .compact-table table td:nth-child(3) { width: 40%; }
+  
+  .reveal .footer {
+    font-size: 0.3em !important;
+    text-align: justify !important;
+    display: block;
+    position: fixed;
+  }
+  
+  .reveal .slides section .fragment.semi-fade-out {
+      opacity: 1;
+      visibility: inherit;
+  
+      &.visible {
+          opacity: 0.25;
+          visibility: inherit;
+      }
+  }
+  
+  .reveal .result {
+    max-height: 100%;
+  }
+  
+  /* Slide numbers to the bottom-right */
+  .slide-number, .reveal.has-logo .slide-number {
+    bottom: 14px !important;
+    right: 50px !important;
+    top: unset !important;
+    color: #777777 !important;
+  }
+  
+  .reveal .slide-logo {
+    height: 100px !important;
+    width: 100px!important;
+    max-width: unset !important;
+    max-height: unset !important;
+    top: 14px !important;
+    right: 50px !important;
+  }
+  
+  .custom-smaller {
+      font-size: 0.8em;
+  }
+  
+  .custom-smaller2 {
+      font-size: 0.5em;
+  }
+  
+.center-text {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    font-size: 1.3em;
+    height: 80vh;
+    width: 100%;
+    margin: 0 auto;
+}
+
+/* Chapter title slides - centered title only */
+.chapter-title {
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    height: 80vh !important;
+}
+
+.chapter-title h2 {
+    text-align: center !important;
+    font-size: 2em !important;
+    margin: 0 !important;
+}
+
+.reveal .title h1 {
+  font-size: 1.8em !important;
+}
+
+/* Add top spacing to slides that need it */
+.reveal .slides section.spacing-top {
+  padding-top: 60px !important;
+}
